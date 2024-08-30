@@ -28,7 +28,7 @@ class MZ_CogVideoXLoader:
                 "vae_name": (folder_paths.get_filename_list("vae"), ),
                 "weight_dtype": (["default", "fp8_e4m3fn", "fp8_e5m2"],),
                 "fp8_fast_mode": ("BOOLEAN", {"default": False}),
-                "dyn_offload_cpu_layer": ("INT", {"default": 0}),
+                "dyn_offload_cpu_layer": ("INT", {"default": 0, "tooltip": "0-42,默认0不启用"}),
                 "enable_sequential_cpu_offload": ("BOOLEAN", {"default": False, "tooltip": "significantly reducing memory usage and slows down the inference"}),
             }}
 
