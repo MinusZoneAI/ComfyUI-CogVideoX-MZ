@@ -12,8 +12,6 @@ def transformer_blocks_to_cpu(m, layer_start=0, layer_size=-1):
     if layer_size == -1:
         m.transformer_blocks.to("cpu")
     else:
-        logger.info(
-            f"transformer_blocks_to_cpu {layer_start} -> {layer_start+layer_size}")
         m.transformer_blocks[layer_start:layer_start +
                              layer_size].to("cpu")
     torch.cuda.empty_cache()
