@@ -26,7 +26,10 @@ class MZ_CogVideoXLoader:
             "required": {
                 "unet_name": (folder_paths.get_filename_list("unet"), ),
                 "vae_name": (folder_paths.get_filename_list("vae"), ),
-                "weight_dtype": (["default", "fp8_e4m3fn"],)
+                "weight_dtype": (["default", "fp8_e4m3fn", "fp8_e5m2"],),
+                "fp8_fast_mode": ("BOOLEAN", {"default": False}),
+                "dyn_offload_cpu_layer": ("INT", {"default": 0}),
+                "enable_sequential_cpu_offload": ("BOOLEAN", {"default": False, "tooltip": "significantly reducing memory usage and slows down the inference"}),
             }}
 
     RETURN_TYPES = ("COGVIDEOPIPE",)

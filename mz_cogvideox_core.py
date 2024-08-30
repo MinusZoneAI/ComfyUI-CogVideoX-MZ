@@ -53,6 +53,44 @@ cogVideoXVaeConfig = {
     "use_post_quant_conv": False,
     "use_quant_conv": False
 }
+
+cogVideoXVaeConfig5B = {
+    "act_fn": "silu",
+    "block_out_channels": [
+        128,
+        256,
+        256,
+        512
+    ],
+    "down_block_types": [
+        "CogVideoXDownBlock3D",
+        "CogVideoXDownBlock3D",
+        "CogVideoXDownBlock3D",
+        "CogVideoXDownBlock3D"
+    ],
+    "force_upcast": True,
+    "in_channels": 3,
+    "latent_channels": 16,
+    "latents_mean": None,
+    "latents_std": None,
+    "layers_per_block": 3,
+    "norm_eps": 1e-06,
+    "norm_num_groups": 32,
+    "out_channels": 3,
+    "sample_height": 480,
+    "sample_width": 720,
+    "scaling_factor": 0.7,
+    "shift_factor": None,
+    "temporal_compression_ratio": 4,
+    "up_block_types": [
+        "CogVideoXUpBlock3D",
+        "CogVideoXUpBlock3D",
+        "CogVideoXUpBlock3D",
+        "CogVideoXUpBlock3D"
+    ],
+    "use_post_quant_conv": False,
+    "use_quant_conv": False
+}
 cogVideoXTransformerConfig = {
     "activation_fn": "gelu-approximate",
     "attention_bias": True,
@@ -122,6 +160,22 @@ cogVideoXDDIMSchedulerConfig = {
     "timestep_spacing": "linspace",
     "trained_betas": None,
 }
+cogVideoXDDIMSchedulerConfig5B = {
+    "beta_end": 0.012,
+    "beta_schedule": "scaled_linear",
+    "beta_start": 0.00085,
+    "clip_sample": False,
+    "clip_sample_range": 1.0,
+    "num_train_timesteps": 1000,
+    "prediction_type": "v_prediction",
+    "rescale_betas_zero_snr": True,
+    "sample_max_value": 1.0,
+    "set_alpha_to_one": True,
+    "snr_shift_scale": 1.0,
+    "steps_offset": 0,
+    "timestep_spacing": "linspace",
+    "trained_betas": None,
+}
 
 
 def fp8_linear_forward(cls, x):
@@ -140,9 +194,8 @@ def fp8_linear_forward(cls, x):
                 scale_input = scale_weight
 
                 bias = cls.bias.to(
-                    torch.float16) if cls.bias is not None else None
-                out_dtype = x.dtype if x.dtype in [
-                    torch.float16, torch.float16] else torch.float16
+                    torch.bfloat16) if cls.bias is not None else None
+                out_dtype = torch.bfloat16
 
                 if bias is not None:
                     o = torch._scaled_mm(
@@ -155,11 +208,10 @@ def fp8_linear_forward(cls, x):
                     o = o[0]
 
                 return o.reshape((-1, x.shape[1], cls.weight.shape[0]))
-
         else:
-            cls.to(torch.float16)
+            cls.to(torch.bfloat16)
             out = cls.original_forward(x.to(
-                torch.float16
+                torch.bfloat16
             ))
             cls.to(original_dtype)
             return out
@@ -171,10 +223,10 @@ import torch.nn as nn
 from types import MethodType
 
 
-def convert_fp8_linear(module):
+def convert_fp8_linear(module, dtype):
     for name, module in module.named_modules():
         if isinstance(module, nn.Linear):
-            module.to(torch.float8_e4m3fn)
+            module.to(dtype)
             original_forward = module.forward
             setattr(module, "original_forward", original_forward)
             setattr(module, "forward", MethodType(fp8_linear_forward, module))
@@ -185,47 +237,80 @@ def MZ_CogVideoXLoader_call(args={}):
 
     unet_path = folder_paths.get_full_path("unet", unet_name)
 
+    dyn_offload_cpu_layer = args.get("dyn_offload_cpu_layer", 0)
+    enable_sequential_cpu_offload = args.get(
+        "enable_sequential_cpu_offload", False)
+
     device = comfy.model_management.get_torch_device()
     offload_device = comfy.model_management.unet_offload_device()
     comfy.model_management.soft_empty_cache()
 
     unet_sd = safetensors.torch.load_file(unet_path)
-    transformerConfig = cogVideoXTransformerConfig5B
-    if "transformer_blocks.30" in unet_sd:
-        transformerConfig = cogVideoXTransformerConfig5B
+    unet_sd_keys = list(unet_sd.keys())
+    transformer_config = cogVideoXTransformerConfig
+    vae_config = cogVideoXVaeConfig
+    scheduler_config = cogVideoXDDIMSchedulerConfig
+    base_path = os.path.join(
+        os.path.dirname(__file__),
+        "configs",
+    )
+    # print(unet_sd_keys)
+    if len([k for k in unet_sd_keys if "transformer_blocks.39" in k]) > 0:
+        transformer_config = cogVideoXTransformerConfig5B
+        vae_config = cogVideoXVaeConfig5B
+        scheduler_config = cogVideoXDDIMSchedulerConfig5B
+        base_path = os.path.join(
+            os.path.dirname(__file__),
+            "configs5b",
+        )
 
     transformer = CogVideoXTransformer3DModel.from_config(
-        transformerConfig)
+        transformer_config)
 
     transformer.load_state_dict(unet_sd)
 
-    dtype = torch.float16
+    dtype = torch.bfloat16
     weight_dtype = args.get("weight_dtype")
     if weight_dtype == "fp8_e4m3fn":
         dtype = torch.float8_e4m3fn
-    transformer.to(dtype).to(device)
-    if weight_dtype == "fp8_e4m3fn":
-        convert_fp8_linear(transformer)
+    elif weight_dtype == "fp8_e5m2":
+        dtype = torch.float8_e5m2
+
+    transformer.to(dtype)
+    if dtype == torch.float8_e4m3fn or dtype == torch.float8_e5m2:
+        fp8_fast_mode = args.get("fp8_fast_mode", False)
+        if fp8_fast_mode:
+            convert_fp8_linear(transformer, dtype)
+
+    if dyn_offload_cpu_layer > 0:
+        from .mz_dyn_cpu_offload import dyn_cpu_offload_model
+        transformer = dyn_cpu_offload_model(transformer)
+        transformer.register_dyn_cpu_offload_model_hooks(dyn_offload_cpu_layer)
+    else:
+        transformer.to(device)
 
     vae_name = args.get("vae_name")
     vae_path = folder_paths.get_full_path("vae", vae_name)
-    vae = AutoencoderKLCogVideoX.from_config(cogVideoXVaeConfig)
+
+    vae = AutoencoderKLCogVideoX.from_config(vae_config)
 
     vae_sd = safetensors.torch.load_file(vae_path)
     vae.load_state_dict(vae_sd)
-    vae.to(device).to(torch.float16)
+    vae.to(device)
 
     scheduler = CogVideoXDDIMScheduler.from_config(
-        cogVideoXDDIMSchedulerConfig)
+        scheduler_config)
 
     pipe = CogVideoXPipeline(vae, transformer, scheduler)
 
+    if enable_sequential_cpu_offload:
+        pipe.enable_sequential_cpu_offload()
+
     pipeline = {
         "pipe": pipe,
-        "dtype": torch.float16,
-        "base_path": os.path.join(
-            os.path.dirname(__file__),
-            "configs",
-        ),
+        "dtype": torch.bfloat16,
+        "base_path": base_path,
+        "onediff": False,
+        "cpu_offloading": enable_sequential_cpu_offload
     }
     return (pipeline, )
