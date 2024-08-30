@@ -12,6 +12,8 @@ def transformer_blocks_to_cpu(m, layer_start=0, layer_size=-1):
     if layer_size == -1:
         m.transformer_blocks.to("cpu")
     else:
+        logger.info(
+            f"transformer_blocks_to_cpu {layer_start} -> {layer_start+layer_size}")
         m.transformer_blocks[layer_start:layer_start +
                              layer_size].to("cpu")
     torch.cuda.empty_cache()
@@ -36,10 +38,9 @@ def dyn_cpu_offload_model(model):
             start_max_vram = torch.cuda.max_memory_allocated() / 1024 / 1024
 
             if layer_start > 0:
-                transformer_blocks_to_cpu(cls, layer_start=0,
+                transformer_blocks_to_cpu(model, layer_start=0,
                                           layer_size=layer_start)
-
-            transformer_blocks_to_cuda(cls, layer_start=layer_start,
+            transformer_blocks_to_cuda(model, layer_start=layer_start,
                                        layer_size=layer_size)
 
             # 当前显存占用
@@ -57,6 +58,57 @@ def dyn_cpu_offload_model(model):
 
     def register_hooks(cls, l):
         cls.all_dyn_cpu_offload_handles = []
+        _handle = cls.transformer_blocks.register_forward_pre_hook(
+            _single_pre_forward_hook)
+        cls.all_dyn_cpu_offload_handles.append(_handle)
+        _handle = cls.transformer_blocks.register_forward_hook(
+            _single_forward_hook)
+        cls.all_dyn_cpu_offload_handles.append(_handle)
+
+        _handle = cls.patch_embed.register_forward_pre_hook(
+            _single_pre_forward_hook)
+        cls.all_dyn_cpu_offload_handles.append(_handle)
+        _handle = cls.patch_embed.register_forward_hook(_single_forward_hook)
+        cls.all_dyn_cpu_offload_handles.append(_handle)
+
+        _handle = cls.embedding_dropout.register_forward_pre_hook(
+            _single_pre_forward_hook)
+        cls.all_dyn_cpu_offload_handles.append(_handle)
+        _handle = cls.embedding_dropout.register_forward_hook(
+            _single_forward_hook)
+        cls.all_dyn_cpu_offload_handles.append(_handle)
+
+        _handle = cls.time_proj.register_forward_pre_hook(
+            _single_pre_forward_hook)
+        cls.all_dyn_cpu_offload_handles.append(_handle)
+        _handle = cls.time_proj.register_forward_hook(_single_forward_hook)
+        cls.all_dyn_cpu_offload_handles.append(_handle)
+
+        _handle = cls.time_embedding.register_forward_pre_hook(
+            _single_pre_forward_hook)
+        cls.all_dyn_cpu_offload_handles.append(_handle)
+        _handle = cls.time_embedding.register_forward_hook(
+            _single_forward_hook)
+        cls.all_dyn_cpu_offload_handles.append(_handle)
+
+        _handle = cls.norm_final.register_forward_pre_hook(
+            _single_pre_forward_hook)
+        cls.all_dyn_cpu_offload_handles.append(_handle)
+        _handle = cls.norm_final.register_forward_hook(_single_forward_hook)
+        cls.all_dyn_cpu_offload_handles.append(_handle)
+
+        _handle = cls.norm_out.register_forward_pre_hook(
+            _single_pre_forward_hook)
+        cls.all_dyn_cpu_offload_handles.append(_handle)
+        _handle = cls.norm_out.register_forward_hook(_single_forward_hook)
+        cls.all_dyn_cpu_offload_handles.append(_handle)
+
+        _handle = cls.proj_out.register_forward_pre_hook(
+            _single_pre_forward_hook)
+        cls.all_dyn_cpu_offload_handles.append(_handle)
+        _handle = cls.proj_out.register_forward_hook(_single_forward_hook)
+        cls.all_dyn_cpu_offload_handles.append(_handle)
+
         transformer_blocks_depth = len(cls.transformer_blocks)
         steps = l
         for i in range(0, transformer_blocks_depth, steps):
@@ -69,13 +121,14 @@ def dyn_cpu_offload_model(model):
                 pre_hook)
             cls.all_dyn_cpu_offload_handles.append(_handle)
 
-        cls.patch_embed.to("cuda")
-        cls.embedding_dropout.to("cuda")
-        cls.time_proj.to("cuda")
-        cls.time_embedding.to("cuda")
-        cls.norm_final.to("cuda")
-        cls.norm_out.to("cuda")
-        cls.proj_out.to("cuda")
+    def _single_pre_forward_hook(module, inp):
+        model.to("cpu")
+        module.to("cuda")
+        return inp
+
+    def _single_forward_hook(module, inp, output):
+        module.to("cpu")
+        return None
 
     setattr(model, "register_dyn_cpu_offload_model_hooks",
             MethodType(register_hooks, model))
