@@ -38,6 +38,8 @@ def dyn_cpu_offload_model(model):
             if layer_start > 0:
                 transformer_blocks_to_cpu(model, layer_start=0,
                                           layer_size=layer_start)
+            else:
+                transformer_blocks_to_cpu(model)
             transformer_blocks_to_cuda(model, layer_start=layer_start,
                                        layer_size=layer_size)
 
@@ -56,56 +58,6 @@ def dyn_cpu_offload_model(model):
 
     def register_hooks(cls, l):
         cls.all_dyn_cpu_offload_handles = []
-        _handle = cls.transformer_blocks.register_forward_pre_hook(
-            _single_pre_forward_hook)
-        cls.all_dyn_cpu_offload_handles.append(_handle)
-        _handle = cls.transformer_blocks.register_forward_hook(
-            _single_forward_hook)
-        cls.all_dyn_cpu_offload_handles.append(_handle)
-
-        _handle = cls.patch_embed.register_forward_pre_hook(
-            _single_pre_forward_hook)
-        cls.all_dyn_cpu_offload_handles.append(_handle)
-        _handle = cls.patch_embed.register_forward_hook(_single_forward_hook)
-        cls.all_dyn_cpu_offload_handles.append(_handle)
-
-        _handle = cls.embedding_dropout.register_forward_pre_hook(
-            _single_pre_forward_hook)
-        cls.all_dyn_cpu_offload_handles.append(_handle)
-        _handle = cls.embedding_dropout.register_forward_hook(
-            _single_forward_hook)
-        cls.all_dyn_cpu_offload_handles.append(_handle)
-
-        _handle = cls.time_proj.register_forward_pre_hook(
-            _single_pre_forward_hook)
-        cls.all_dyn_cpu_offload_handles.append(_handle)
-        _handle = cls.time_proj.register_forward_hook(_single_forward_hook)
-        cls.all_dyn_cpu_offload_handles.append(_handle)
-
-        _handle = cls.time_embedding.register_forward_pre_hook(
-            _single_pre_forward_hook)
-        cls.all_dyn_cpu_offload_handles.append(_handle)
-        _handle = cls.time_embedding.register_forward_hook(
-            _single_forward_hook)
-        cls.all_dyn_cpu_offload_handles.append(_handle)
-
-        _handle = cls.norm_final.register_forward_pre_hook(
-            _single_pre_forward_hook)
-        cls.all_dyn_cpu_offload_handles.append(_handle)
-        _handle = cls.norm_final.register_forward_hook(_single_forward_hook)
-        cls.all_dyn_cpu_offload_handles.append(_handle)
-
-        _handle = cls.norm_out.register_forward_pre_hook(
-            _single_pre_forward_hook)
-        cls.all_dyn_cpu_offload_handles.append(_handle)
-        _handle = cls.norm_out.register_forward_hook(_single_forward_hook)
-        cls.all_dyn_cpu_offload_handles.append(_handle)
-
-        _handle = cls.proj_out.register_forward_pre_hook(
-            _single_pre_forward_hook)
-        cls.all_dyn_cpu_offload_handles.append(_handle)
-        _handle = cls.proj_out.register_forward_hook(_single_forward_hook)
-        cls.all_dyn_cpu_offload_handles.append(_handle)
 
         transformer_blocks_depth = len(cls.transformer_blocks)
         steps = l
@@ -119,14 +71,13 @@ def dyn_cpu_offload_model(model):
                 pre_hook)
             cls.all_dyn_cpu_offload_handles.append(_handle)
 
-    def _single_pre_forward_hook(module, inp):
-        model.to("cpu")
-        module.to("cuda")
-        return inp
-
-    def _single_forward_hook(module, inp, output):
-        module.to("cpu")
-        return None
+        cls.patch_embed.to("cuda")
+        cls.embedding_dropout.to("cuda")
+        cls.time_proj.to("cuda")
+        cls.time_embedding.to("cuda")
+        cls.norm_final.to("cuda")
+        cls.norm_out.to("cuda")
+        cls.proj_out.to("cuda")
 
     setattr(model, "register_dyn_cpu_offload_model_hooks",
             MethodType(register_hooks, model))
@@ -138,4 +89,20 @@ def dyn_cpu_offload_model(model):
 
     setattr(model, "unregister_dyn_cpu_offload_model_hooks",
             MethodType(unregister_hooks, model))
+
+    setattr(model, "th_to", model.to)
+
+    def to(self, *args, **kwargs):
+        for arg in args:
+            if isinstance(arg, torch.device):
+                continue
+            if isinstance(arg, str):
+                if arg == "cpu" or arg == "cuda":
+                    continue
+
+            self.th_to(arg)
+        logger.info(f"model.to {args} {kwargs}")
+        return self
+
+    model.to = MethodType(to, model)
     return model
