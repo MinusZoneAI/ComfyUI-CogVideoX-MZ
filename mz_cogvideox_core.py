@@ -269,14 +269,17 @@ def MZ_CogVideoXLoader_call(args={}):
 
     transformer.load_state_dict(unet_sd)
 
-    dtype = torch.bfloat16
+    dtype = None
     weight_dtype = args.get("weight_dtype")
     if weight_dtype == "fp8_e4m3fn":
         dtype = torch.float8_e4m3fn
+        transformer.to(dtype)
     elif weight_dtype == "fp8_e5m2":
         dtype = torch.float8_e5m2
+        transformer.to(dtype)
+    else:
+        dtype = transformer.parameters().__next__().dtype
 
-    transformer.to(dtype)
     if dtype == torch.float8_e4m3fn or dtype == torch.float8_e5m2:
         fp8_fast_mode = args.get("fp8_fast_mode", False)
         if fp8_fast_mode:
