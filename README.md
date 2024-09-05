@@ -4,7 +4,9 @@
 
 ## Update - 2024-09-05
 部分层4位量化模型, 采样方式选择DPM, weight_dtype选择GGUF, cpu_offload不启用分辨率480x720在32帧下占用显存小于8G
+
 [CogVideoX_5b_GGUF_Q4_0.safetensors](https://modelscope.cn/models/wailovet/CogVideoX-5b/resolve/master/CogVideoX_5b_GGUF_Q4_0.safetensors) 下载到unet文件夹
+
 4位量化工作流在examples\workflow_GGUF_Q4_0.png
 
 ## 使用
