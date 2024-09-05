@@ -263,20 +263,33 @@ def MZ_CogVideoXLoader_call(args={}):
             os.path.dirname(__file__),
             "configs5b",
         )
-
-    transformer = CogVideoXTransformer3DModel.from_config(
-        transformer_config)
-
-    transformer.load_state_dict(unet_sd)
-
     dtype = None
     weight_dtype = args.get("weight_dtype")
+
+    transformer = None
+    if weight_dtype not in ["GGUF"]:
+        transformer = CogVideoXTransformer3DModel.from_config(
+            transformer_config)
+        transformer.load_state_dict(unet_sd)
+
     if weight_dtype == "fp8_e4m3fn":
         dtype = torch.float8_e4m3fn
         transformer.to(dtype)
     elif weight_dtype == "fp8_e5m2":
         dtype = torch.float8_e5m2
         transformer.to(dtype)
+    elif weight_dtype == "GGUF":
+        dtype = torch.float8_e4m3fn
+        from . import mz_gguf_loader
+        import importlib
+        importlib.reload(mz_gguf_loader)
+        with mz_gguf_loader.quantize_lazy_load():
+            transformer = CogVideoXTransformer3DModel.from_config(
+                transformer_config)
+            transformer.to(dtype)
+            transformer = mz_gguf_loader.quantize_load_state_dict(
+                transformer, unet_sd, device="cpu")
+            transformer.to(device)
     else:
         dtype = transformer.parameters().__next__().dtype
 

@@ -17,6 +17,7 @@ import inspect
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import torch
+import torch.nn.functional as F
 import math
 
 from diffusers.models import AutoencoderKLCogVideoX, CogVideoXTransformer3DModel
@@ -138,6 +139,7 @@ class CogVideoXPipeline(DiffusionPipeline):
         vae: AutoencoderKLCogVideoX,
         transformer: CogVideoXTransformer3DModel,
         scheduler: Union[CogVideoXDDIMScheduler, CogVideoXDPMScheduler],
+        original_mask = None
     ):
         super().__init__()
 
@@ -150,7 +152,7 @@ class CogVideoXPipeline(DiffusionPipeline):
         self.vae_scale_factor_temporal = (
             self.vae.config.temporal_compression_ratio if hasattr(self, "vae") and self.vae is not None else 4
         )
-
+        self.original_mask = original_mask
         self.video_processor = VideoProcessor(vae_scale_factor=self.vae_scale_factor_spatial)
 
     def prepare_latents(
@@ -168,9 +170,9 @@ class CogVideoXPipeline(DiffusionPipeline):
                 f"You have passed a list of generators of length {len(generator)}, but requested an effective batch"
                 f" size of {batch_size}. Make sure the batch size matches the length of the generators."
             )
-
+        noise = randn_tensor(shape, generator=generator, device=device, dtype=self.vae.dtype)
         if latents is None:
-            latents = randn_tensor(shape, generator=generator, device=device, dtype=self.vae.dtype)            
+            latents = noise
         else:
             latents = latents.to(device)
             timesteps, num_inference_steps = self.get_timesteps(num_inference_steps, denoise_strength, device)
@@ -189,7 +191,7 @@ class CogVideoXPipeline(DiffusionPipeline):
 
             latents = self.scheduler.add_noise(latents, noise, latent_timestep)
         latents = latents * self.scheduler.init_noise_sigma # scale the initial noise by the standard deviation required by the scheduler
-        return latents, timesteps
+        return latents, timesteps, noise
 
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.prepare_extra_step_kwargs
     def prepare_extra_step_kwargs(self, generator, eta):
@@ -330,10 +332,11 @@ class CogVideoXPipeline(DiffusionPipeline):
         num_videos_per_prompt: int = 1,
         eta: float = 0.0,
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
-        latents: Optional[torch.FloatTensor] = None,
-        prompt_embeds: Optional[torch.FloatTensor] = None,
-        negative_prompt_embeds: Optional[torch.FloatTensor] = None,
+        latents: Optional[torch.Tensor] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
+        negative_prompt_embeds: Optional[torch.Tensor] = None,
         device = torch.device("cuda"),
+        scheduler_name: str = "DPM",
     ):
         """
         Function invoked when calling the pipeline for generation.
@@ -420,7 +423,11 @@ class CogVideoXPipeline(DiffusionPipeline):
         if latents is None and num_frames == t_tile_length:
             num_frames += 1
 
-        latents, timesteps = self.prepare_latents(
+        if self.original_mask is not None:
+            image_latents = latents
+            original_image_latents = image_latents
+
+        latents, timesteps, noise = self.prepare_latents(
             batch_size * num_videos_per_prompt,
             latent_channels,
             num_frames,
@@ -435,14 +442,9 @@ class CogVideoXPipeline(DiffusionPipeline):
             latents
         )
         latents = latents.to(self.transformer.dtype)
-
+       
         # 6. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
-
-        t_tile_weights = self._gaussian_weights(t_tile_length=t_tile_length, t_batch_size=1).to(latents.device).to(latents.dtype)
-        print("latents.shape", latents.shape)
-        print("latents.device", latents.device)
-
 
         # 6.5. Create rotary embeds if required
         image_rotary_emb = (
@@ -451,16 +453,39 @@ class CogVideoXPipeline(DiffusionPipeline):
             else None
         )
 
+        # masks
+        if self.original_mask is not None:
+            mask = self.original_mask.to(device)
+            print("self.original_mask: ", self.original_mask.shape)
+            
+            mask = F.interpolate(self.original_mask.unsqueeze(1), size=(latents.shape[-2], latents.shape[-1]), mode='bilinear', align_corners=False)
+            if mask.shape[0] != latents.shape[1]:
+                mask = mask.unsqueeze(1).repeat(1, latents.shape[1], 16, 1, 1)
+            else:
+                mask = mask.unsqueeze(0).repeat(1, 1, 16, 1, 1)
+            print("latents: ", latents.shape)
+            print("mask: ", mask.shape)
+
         # 7. Denoising loop
         num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
         comfy_pbar = ProgressBar(num_inference_steps)
-        with self.progress_bar(total=num_inference_steps) as progress_bar:
-            # for DPM-solver++
-            old_pred_original_sample = None
+
+        # 8. Temporal tiling prep
+        if "tiled" in scheduler_name:
+            t_tile_weights = self._gaussian_weights(t_tile_length=t_tile_length, t_batch_size=1).to(latents.device).to(self.vae.dtype)
+            temporal_tiling = True
+            print("Temporal tiling enabled")
+        else:
+            temporal_tiling = False
+            print("Temporal tiling disabled")
+        print("latents.shape", latents.shape)
+        
+        with self.progress_bar(total=num_inference_steps) as progress_bar:    
+            old_pred_original_sample = None # for DPM-solver++
             for i, t in enumerate(timesteps):
                 if self.interrupt:
                     continue
-                if not isinstance(self.scheduler, CogVideoXDPMScheduler):
+                if temporal_tiling and isinstance(self.scheduler, CogVideoXDDIMScheduler):
                     #temporal tiling code based on https://github.com/mayuelala/FollowYourEmoji/blob/main/models/video_pipeline.py
                     # =====================================================
                     grid_ts = 0
@@ -513,12 +538,12 @@ class CogVideoXPipeline(DiffusionPipeline):
                             noise_pred = noise_pred_uncond + self._guidance_scale * (noise_pred_text - noise_pred_uncond)
 
                         # compute the previous noisy sample x_t -> x_t-1
-                        latents_tile = self.scheduler.step(noise_pred, t, latents_tile, **extra_step_kwargs, return_dict=False)[0]            
+                        latents_tile = self.scheduler.step(noise_pred, t, latents_tile.to(self.vae.dtype), **extra_step_kwargs, return_dict=False)[0]
                         latents_all_list.append(latents_tile)
 
                     # ==========================================
-                    latents_all = torch.zeros(latents.shape, device=latents.device, dtype=latents.dtype)
-                    contributors = torch.zeros(latents.shape, device=latents.device, dtype=latents.dtype)
+                    latents_all = torch.zeros(latents.shape, device=latents.device, dtype=self.vae.dtype)
+                    contributors = torch.zeros(latents.shape, device=latents.device, dtype=self.vae.dtype)
                     # Add each tile contribution to overall latents
                     for t_i in range(grid_ts):
                         if t_i < grid_ts - 1:
@@ -535,13 +560,25 @@ class CogVideoXPipeline(DiffusionPipeline):
                     latents_all /= contributors
 
                     latents = latents_all
+                    #print("latents",latents.shape)
+                    # start diff diff
+                    if i < len(timesteps) - 1 and self.original_mask is not None:
+                        noise_timestep = timesteps[i + 1]
+                        image_latent = self.scheduler.add_noise(original_image_latents, noise, torch.tensor([noise_timestep])
+                        )
+                        mask = mask.to(latents)
+                        ts_from = timesteps[0]
+                        ts_to = timesteps[-1]
+                        threshold = (t - ts_to) / (ts_from - ts_to)
+                        mask = torch.where(mask >= threshold, mask, torch.zeros_like(mask))
+                        latents = image_latent * mask + latents * (1 - mask)
+                        # end diff diff
                     
                     if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                         progress_bar.update()
                         comfy_pbar.update(1)
                     # ==========================================
                 else:
-                    
                     latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
                     latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
@@ -558,26 +595,41 @@ class CogVideoXPipeline(DiffusionPipeline):
                     )[0]
                     noise_pred = noise_pred.float()
 
-                   
-                    self._guidance_scale = 1 + guidance_scale * (
-                        (1 - math.cos(math.pi * ((num_inference_steps - t.item()) / num_inference_steps) ** 5.0)) / 2
-                    )
+                    if isinstance(self.scheduler, CogVideoXDPMScheduler):
+                        self._guidance_scale = 1 + guidance_scale * (
+                            (1 - math.cos(math.pi * ((num_inference_steps - t.item()) / num_inference_steps) ** 5.0)) / 2
+                        )
                     
                     if do_classifier_free_guidance:
                         noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
                         noise_pred = noise_pred_uncond + self._guidance_scale * (noise_pred_text - noise_pred_uncond)
 
                     # compute the previous noisy sample x_t -> x_t-1
-                    latents, old_pred_original_sample = self.scheduler.step(
-                        noise_pred,
-                        old_pred_original_sample,
-                        t,
-                        timesteps[i - 1] if i > 0 else None,
-                        latents.to(self.vae.dtype),
-                        **extra_step_kwargs,
-                        return_dict=False,
-                    )
+                    if not isinstance(self.scheduler, CogVideoXDPMScheduler):
+                        latents = self.scheduler.step(noise_pred, t, latents.to(self.vae.dtype), **extra_step_kwargs, return_dict=False)[0]
+                    else:
+                        latents, old_pred_original_sample = self.scheduler.step(
+                            noise_pred,
+                            old_pred_original_sample,
+                            t,
+                            timesteps[i - 1] if i > 0 else None,
+                            latents.to(self.vae.dtype),
+                            **extra_step_kwargs,
+                            return_dict=False,
+                        )
                     latents = latents.to(prompt_embeds.dtype)
+                    # start diff diff
+                    if i < len(timesteps) - 1 and self.original_mask is not None:
+                        noise_timestep = timesteps[i + 1]
+                        image_latent = self.scheduler.add_noise(original_image_latents, noise, torch.tensor([noise_timestep])
+                        )
+                        mask = mask.to(latents)
+                        ts_from = timesteps[0]
+                        ts_to = timesteps[-1]
+                        threshold = (t - ts_to) / (ts_from - ts_to)
+                        mask = torch.where(mask >= threshold, mask, torch.zeros_like(mask))
+                        latents = image_latent * mask + latents * (1 - mask)
+                        # end diff diff
 
                     if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                         progress_bar.update()
