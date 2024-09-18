@@ -1,6 +1,13 @@
 ![image](./examples/workflow.png)
 
 # ComfyUI-CogVideoX-MZ
+## Update - 2024-09-19
+支持CogVideoX-Fun图生视频, 提供Q4量化模型
+(support CogVideoX-Fun image to video, provide Q4 quantization model)
+
+[CogVideoX_Fun_GGUF_Q4_0.safetensors](https://modelscope.cn/models/wailovet/CogVideoX-5b/resolve/master/CogVideoX_5b_fun_GGUF_Q4_0.safetensors) 下载到unet文件夹
+
+工作流在examples\workflow_I2V_GGUF_Q4_0.png (Workflow in examples\workflow_I2V_GGUF_Q4_0.png)
 
 ## Update - 2024-09-05
 部分层4位量化模型, 采样方式选择DPM, weight_dtype选择GGUF, cpu_offload不启用分辨率480x720在32帧下占用显存小于8G
