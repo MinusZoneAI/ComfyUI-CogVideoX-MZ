@@ -10,6 +10,8 @@
 
 工作流在examples\workflow_I2V_GGUF_Q4_0.png (Workflow in examples\workflow_I2V_GGUF_Q4_0.png)
 
+https://github.com/user-attachments/assets/32101df0-d50c-404a-a2ea-3ddff0dcc59b
+
 ## Update - 2024-09-05
 部分层4位量化模型, 采样方式选择DPM, weight_dtype选择GGUF, cpu_offload不启用分辨率480x720在32帧下占用显存小于8G
 
