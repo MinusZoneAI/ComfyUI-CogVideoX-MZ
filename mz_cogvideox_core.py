@@ -12,6 +12,10 @@ import folder_paths
 import safetensors.torch
 
 from .pipeline_cogvideox import CogVideoXPipeline
+from .cogvideox_fun.transformer_3d import CogVideoXTransformer3DModel as CogVideoXTransformer3DModelFun
+from .cogvideox_fun.autoencoder_magvit import AutoencoderKLCogVideoX as AutoencoderKLCogVideoXFun
+from .cogvideox_fun.utils import get_image_to_video_latent, ASPECT_RATIO_512, get_closest_ratio, to_pil
+from .cogvideox_fun.pipeline_cogvideox_inpaint import CogVideoX_Fun_Pipeline_Inpaint
 from diffusers.models import AutoencoderKLCogVideoX, CogVideoXTransformer3DModel
 from diffusers.schedulers import CogVideoXDDIMScheduler
 
@@ -91,6 +95,7 @@ cogVideoXVaeConfig5B = {
     "use_post_quant_conv": False,
     "use_quant_conv": False
 }
+ 
 cogVideoXTransformerConfig = {
     "activation_fn": "gelu-approximate",
     "attention_bias": True,
@@ -160,6 +165,7 @@ cogVideoXDDIMSchedulerConfig = {
     "timestep_spacing": "linspace",
     "trained_betas": None,
 }
+
 cogVideoXDDIMSchedulerConfig5B = {
     "beta_end": 0.012,
     "beta_schedule": "scaled_linear",
@@ -255,6 +261,21 @@ def MZ_CogVideoXLoader_call(args={}):
         "configs",
     )
     # print(unet_sd_keys)
+    transformer_type = ""
+    if "patch_embed.proj.weight" in unet_sd_keys:
+        if unet_sd["patch_embed.proj.weight"].shape == (3072, 33, 2, 2):
+            transformer_config = cogVideoXTransformerConfig5B
+            transformer_config["in_channels"] = 33
+            vae_config = cogVideoXVaeConfig5B
+            scheduler_config = cogVideoXDDIMSchedulerConfig5B
+            base_path = os.path.join(
+                os.path.dirname(__file__),
+                "configs5b",
+            )
+            transformer_type = "fun_5b"
+        else:
+            raise Exception("This model is not supported")
+
     if len([k for k in unet_sd_keys if "transformer_blocks.39" in k]) > 0:
         transformer_config = cogVideoXTransformerConfig5B
         vae_config = cogVideoXVaeConfig5B
@@ -268,8 +289,13 @@ def MZ_CogVideoXLoader_call(args={}):
 
     transformer = None
     if weight_dtype not in ["GGUF"]:
-        transformer = CogVideoXTransformer3DModel.from_config(
-            transformer_config)
+        if transformer_type == "fun_5b":
+            transformer = CogVideoXTransformer3DModelFun.from_config(
+                transformer_config)
+        else:
+            transformer = CogVideoXTransformer3DModel.from_config(
+                transformer_config)
+
         transformer.load_state_dict(unet_sd)
 
     if weight_dtype == "fp8_e4m3fn":
@@ -284,8 +310,12 @@ def MZ_CogVideoXLoader_call(args={}):
         import importlib
         importlib.reload(mz_gguf_loader)
         with mz_gguf_loader.quantize_lazy_load():
-            transformer = CogVideoXTransformer3DModel.from_config(
-                transformer_config)
+            if transformer_type == "fun_5b":
+                transformer = CogVideoXTransformer3DModelFun.from_config(
+                    transformer_config)
+            else:
+                transformer = CogVideoXTransformer3DModel.from_config(
+                    transformer_config)
             transformer.to(dtype)
             transformer = mz_gguf_loader.quantize_load_state_dict(
                 transformer, unet_sd, device="cpu")
@@ -307,9 +337,10 @@ def MZ_CogVideoXLoader_call(args={}):
 
     vae_name = args.get("vae_name")
     vae_path = folder_paths.get_full_path("vae", vae_name)
-
-    vae = AutoencoderKLCogVideoX.from_config(vae_config)
-
+    if transformer_type == "fun_5b":
+        vae = AutoencoderKLCogVideoXFun.from_config(vae_config)
+    else:
+        vae = AutoencoderKLCogVideoX.from_config(vae_config)
     vae_sd = safetensors.torch.load_file(vae_path)
     vae.load_state_dict(vae_sd)
     vae.to(device)
@@ -317,7 +348,10 @@ def MZ_CogVideoXLoader_call(args={}):
     scheduler = CogVideoXDDIMScheduler.from_config(
         scheduler_config)
 
-    pipe = CogVideoXPipeline(vae, transformer, scheduler)
+    if transformer_type == "fun_5b":
+        pipe = CogVideoX_Fun_Pipeline_Inpaint(vae, transformer, scheduler)
+    else:
+        pipe = CogVideoXPipeline(vae, transformer, scheduler)
 
     if enable_sequential_cpu_offload:
         pipe.enable_sequential_cpu_offload()
