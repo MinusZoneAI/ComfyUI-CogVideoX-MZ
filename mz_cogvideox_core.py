@@ -95,7 +95,7 @@ cogVideoXVaeConfig5B = {
     "use_post_quant_conv": False,
     "use_quant_conv": False
 }
- 
+
 cogVideoXTransformerConfig = {
     "activation_fn": "gelu-approximate",
     "attention_bias": True,
@@ -270,13 +270,13 @@ def MZ_CogVideoXLoader_call(args={}):
             scheduler_config = cogVideoXDDIMSchedulerConfig5B
             base_path = os.path.join(
                 os.path.dirname(__file__),
-                "configs5b",
+                "configs-Fun",
             )
             transformer_type = "fun_5b"
         else:
             raise Exception("This model is not supported")
 
-    if len([k for k in unet_sd_keys if "transformer_blocks.39" in k]) > 0:
+    elif len([k for k in unet_sd_keys if "transformer_blocks.39" in k]) > 0:
         transformer_config = cogVideoXTransformerConfig5B
         vae_config = cogVideoXVaeConfig5B
         scheduler_config = cogVideoXDDIMSchedulerConfig5B
@@ -284,6 +284,7 @@ def MZ_CogVideoXLoader_call(args={}):
             os.path.dirname(__file__),
             "configs5b",
         )
+        
     dtype = None
     weight_dtype = args.get("weight_dtype")
 
