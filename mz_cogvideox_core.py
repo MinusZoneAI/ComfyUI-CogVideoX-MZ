@@ -227,6 +227,7 @@ def gen_fp8_linear_forward(cast_dtype):
             return cls.original_forward(x)
     return fp8_linear_forward
 
+
 import torch.nn as nn
 from types import MethodType
 
@@ -331,7 +332,8 @@ def MZ_CogVideoXLoader_call(args={}):
         weight_dtype = torch.float32
         manual_cast_dtype = torch.float32
 
-    print(f"model weight dtype: {weight_dtype} manual cast dtype: {manual_cast_dtype}")
+    print(
+        f"model weight dtype: {weight_dtype} manual cast dtype: {manual_cast_dtype}")
 
     transformer = None
     CogVideoXTransformer3DModelImp = None
@@ -394,6 +396,7 @@ def MZ_CogVideoXLoader_call(args={}):
         "dtype": manual_cast_dtype,
         "base_path": base_path,
         "onediff": False,
-        "cpu_offloading": enable_sequential_cpu_offload
+        "cpu_offloading": enable_sequential_cpu_offload,
+        "scheduler_config": scheduler_config,
     }
     return (pipeline, )
