@@ -412,14 +412,14 @@ class CogVideoXPipeline(DiffusionPipeline):
 
         if do_classifier_free_guidance:
             prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
-        prompt_embeds = prompt_embeds.to(self.transformer.dtype)
+        prompt_embeds = prompt_embeds.to(self.vae.dtype)
 
         # 4. Prepare timesteps
         timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, device, timesteps)
         self._num_timesteps = len(timesteps)
 
         # 5. Prepare latents.
-        latent_channels = self.transformer.config.in_channels
+        latent_channels = self.vae.config.latent_channels
 
         if latents is None and num_frames == t_tile_length:
             num_frames += 1
@@ -434,7 +434,7 @@ class CogVideoXPipeline(DiffusionPipeline):
             num_frames,
             height,
             width,
-            prompt_embeds.dtype,
+            self.vae.dtype,
             device,
             generator,
             timesteps,
@@ -442,21 +442,20 @@ class CogVideoXPipeline(DiffusionPipeline):
             num_inference_steps,
             latents
         )
-        latents = latents.to(self.transformer.dtype)
+        latents = latents.to(self.vae.dtype)
+        print("latents", latents.shape)
 
         # 5.5.
         if image_cond_latents is not None:
-            image_cond_latents = torch.cat(image_cond_latents, dim=0).to(self.transformer.dtype)#.permute(0, 2, 1, 3, 4)  # [B, F, C, H, W]
-
             padding_shape = (
                 batch_size,
-                num_frames - 1,
-                latent_channels,
+                (latents.shape[1] - 1),
+                self.vae.config.latent_channels,
                 height // self.vae_scale_factor_spatial,
                 width // self.vae_scale_factor_spatial,
             )
-            latent_padding = torch.zeros(padding_shape, device=device, dtype=self.transformer.dtype)
-            image_latents = torch.cat([image_latents, latent_padding], dim=1)
+            latent_padding = torch.zeros(padding_shape, device=device, dtype=self.vae.dtype)
+            image_cond_latents = torch.cat([image_cond_latents, latent_padding], dim=1)
        
         # 6. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)

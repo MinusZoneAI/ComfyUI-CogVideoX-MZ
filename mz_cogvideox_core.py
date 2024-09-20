@@ -370,7 +370,7 @@ def MZ_CogVideoXLoader_call(args={}):
 
     vae_name = args.get("vae_name")
     vae_path = folder_paths.get_full_path("vae", vae_name)
-    if transformer_type == "fun_5b":
+    if transformer_type.startswith("fun"):
         vae = AutoencoderKLCogVideoXFun.from_config(vae_config)
     else:
         vae = AutoencoderKLCogVideoX.from_config(vae_config)
@@ -383,7 +383,7 @@ def MZ_CogVideoXLoader_call(args={}):
     scheduler = CogVideoXDDIMScheduler.from_config(
         scheduler_config)
 
-    if transformer_type == "fun_5b":
+    if transformer_type.startswith("fun"):
         pipe = CogVideoX_Fun_Pipeline_Inpaint(vae, transformer, scheduler)
     else:
         pipe = CogVideoXPipeline(vae, transformer, scheduler)
