@@ -1,6 +1,12 @@
 ![image](./examples/workflow_I2V_GGUF_Q4_0.png)
 
-# ComfyUI-CogVideoX-MZ
+# ComfyUI-CogVideoX-MZ 
+
+在 https://github.com/kijai/ComfyUI-CogVideoXWrapper 的基础上增加一个独立的模型加载器和一些其他的功能, 使用前需要先安装ComfyUI-CogVideoXWrapper
+ 
+Based on https://github.com/kijai/ComfyUI-CogVideoXWrapper add model loader and some other features, you need to install ComfyUI-CogVideoXWrapper before using
+
+
 ## Update - 2024-09-19
 支持CogVideoX-Fun图生视频, 提供Q4量化模型
 
@@ -54,3 +60,9 @@ Model download address
 
 Workflow in examples/*.png
 
+
+## Credits
+
+- [CogVideo](https://github.com/THUDM/CogVideo)
+- [CogVideoX-Fun](https://github.com/aigc-apps/CogVideoX-Fun)
+- [ComfyUI-CogVideoXWrapper](https://github.com/kijai/ComfyUI-CogVideoXWrapper)
