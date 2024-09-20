@@ -1,5 +1,6 @@
 
 
+from contextlib import nullcontext
 import os
 import torch
 import comfy.supported_models
@@ -119,7 +120,8 @@ cogVideoXTransformerConfig = {
     "temporal_interpolation_scale": 1.0,
     "text_embed_dim": 4096,
     "time_embed_dim": 512,
-    "timestep_activation_fn": "silu"
+    "timestep_activation_fn": "silu",
+    "use_rotary_positional_embeddings": False
 }
 
 cogVideoXTransformerConfig5B = {
@@ -184,58 +186,59 @@ cogVideoXDDIMSchedulerConfig5B = {
 }
 
 
-def fp8_linear_forward(cls, x):
-    original_dtype = cls.weight.dtype
-    if original_dtype == torch.float8_e4m3fn or original_dtype == torch.float8_e5m2:
-        if len(x.shape) == 3:
-            with torch.no_grad():
-                if original_dtype == torch.float8_e4m3fn:
-                    inn = x.reshape(-1, x.shape[2]).to(torch.float8_e5m2)
-                else:
-                    inn = x.reshape(-1, x.shape[2]).to(torch.float8_e4m3fn)
-                w = cls.weight.t()
+def gen_fp8_linear_forward(cast_dtype):
+    def fp8_linear_forward(cls, x):
+        original_dtype = cls.weight.dtype
+        if original_dtype == torch.float8_e4m3fn or original_dtype == torch.float8_e5m2:
+            if len(x.shape) == 3:
+                with torch.no_grad():
+                    if original_dtype == torch.float8_e4m3fn:
+                        inn = x.reshape(-1, x.shape[2]).to(torch.float8_e5m2)
+                    else:
+                        inn = x.reshape(-1, x.shape[2]).to(torch.float8_e4m3fn)
+                    w = cls.weight.t()
 
-                scale_weight = torch.ones(
-                    (1), device=x.device, dtype=torch.float32)
-                scale_input = scale_weight
+                    scale_weight = torch.ones(
+                        (1), device=x.device, dtype=torch.float32)
+                    scale_input = scale_weight
 
-                bias = cls.bias.to(
-                    torch.bfloat16) if cls.bias is not None else None
-                out_dtype = torch.bfloat16
+                    bias = cls.bias.to(
+                        cast_dtype) if cls.bias is not None else None
 
-                if bias is not None:
-                    o = torch._scaled_mm(
-                        inn, w, out_dtype=out_dtype, bias=bias, scale_a=scale_input, scale_b=scale_weight)
-                else:
-                    o = torch._scaled_mm(
-                        inn, w, out_dtype=out_dtype, scale_a=scale_input, scale_b=scale_weight)
+                    if bias is not None:
+                        o = torch._scaled_mm(
+                            inn, w, out_dtype=cast_dtype, bias=bias, scale_a=scale_input, scale_b=scale_weight)
+                    else:
+                        o = torch._scaled_mm(
+                            inn, w, out_dtype=cast_dtype, scale_a=scale_input, scale_b=scale_weight)
 
-                if isinstance(o, tuple):
-                    o = o[0]
+                    if isinstance(o, tuple):
+                        o = o[0]
 
-                return o.reshape((-1, x.shape[1], cls.weight.shape[0]))
+                    return o.reshape((-1, x.shape[1], cls.weight.shape[0]))
+            else:
+                cls.to(cast_dtype)
+                out = cls.original_forward(x.to(
+                    cast_dtype
+                ))
+                cls.to(original_dtype)
+                return out
         else:
-            cls.to(torch.bfloat16)
-            out = cls.original_forward(x.to(
-                torch.bfloat16
-            ))
-            cls.to(original_dtype)
-            return out
-    else:
-        return cls.original_forward(x)
-
+            return cls.original_forward(x)
+    return fp8_linear_forward
 
 import torch.nn as nn
 from types import MethodType
 
 
-def convert_fp8_linear(module, dtype):
+def convert_fp8_linear(module, dtype, cast_dtype):
     for name, module in module.named_modules():
         if isinstance(module, nn.Linear):
             module.to(dtype)
             original_forward = module.forward
             setattr(module, "original_forward", original_forward)
-            setattr(module, "forward", MethodType(fp8_linear_forward, module))
+            setattr(module, "forward", MethodType(
+                gen_fp8_linear_forward(cast_dtype), module))
 
 
 def MZ_CogVideoXLoader_call(args={}):
@@ -243,40 +246,41 @@ def MZ_CogVideoXLoader_call(args={}):
 
     unet_path = folder_paths.get_full_path("unet", unet_name)
 
-    dyn_offload_cpu_layer = args.get("dyn_offload_cpu_layer", 0)
     enable_sequential_cpu_offload = args.get(
         "enable_sequential_cpu_offload", False)
 
     device = comfy.model_management.get_torch_device()
-    offload_device = comfy.model_management.unet_offload_device()
+
     comfy.model_management.soft_empty_cache()
 
     unet_sd = safetensors.torch.load_file(unet_path)
     unet_sd_keys = list(unet_sd.keys())
-    transformer_config = cogVideoXTransformerConfig
-    vae_config = cogVideoXVaeConfig
-    scheduler_config = cogVideoXDDIMSchedulerConfig
-    base_path = os.path.join(
-        os.path.dirname(__file__),
-        "configs",
-    )
-    # print(unet_sd_keys)
-    transformer_type = ""
-    if "patch_embed.proj.weight" in unet_sd_keys:
-        if unet_sd["patch_embed.proj.weight"].shape == (3072, 33, 2, 2):
-            transformer_config = cogVideoXTransformerConfig5B
-            transformer_config["in_channels"] = 33
-            vae_config = cogVideoXVaeConfig5B
-            scheduler_config = cogVideoXDDIMSchedulerConfig5B
-            base_path = os.path.join(
-                os.path.dirname(__file__),
-                "configs-Fun",
-            )
-            transformer_type = "fun_5b"
-        else:
-            raise Exception("This model is not supported")
 
-    elif len([k for k in unet_sd_keys if "transformer_blocks.39" in k]) > 0:
+    transformer_type = ""
+    if unet_sd["patch_embed.proj.weight"].shape == (3072, 33, 2, 2):
+        transformer_type = "fun_5b"
+    elif unet_sd["patch_embed.proj.weight"].shape == (3072, 16, 2, 2):
+        transformer_type = "5b"
+    elif unet_sd["patch_embed.proj.weight"].shape == (1920, 33, 2, 2):
+        transformer_type = "fun_2b"
+    elif unet_sd["patch_embed.proj.weight"].shape == (1920, 16, 2, 2):
+        transformer_type = "2b"
+    else:
+        raise Exception("This model is not supported")
+
+    is_GGUF = False
+    if len([k for k in unet_sd_keys if "Q4_0_qweight" in k]) > 0:
+        is_GGUF = True
+
+    print(f"transformer type: {transformer_type}")
+    print(f"GGUF: {is_GGUF}")
+
+    transformer_config = None
+    vae_config = None
+    scheduler_config = None
+    base_path = None
+
+    if transformer_type.endswith("5b"):
         transformer_config = cogVideoXTransformerConfig5B
         vae_config = cogVideoXVaeConfig5B
         scheduler_config = cogVideoXDDIMSchedulerConfig5B
@@ -284,57 +288,83 @@ def MZ_CogVideoXLoader_call(args={}):
             os.path.dirname(__file__),
             "configs5b",
         )
-        
-    dtype = None
-    weight_dtype = args.get("weight_dtype")
+
+        if transformer_type == "fun_5b":
+            transformer_config["in_channels"] = 33
+            base_path = os.path.join(
+                os.path.dirname(__file__),
+                "configs5b-Fun",
+            )
+
+    if transformer_type.endswith("2b"):
+        transformer_config = cogVideoXTransformerConfig
+        vae_config = cogVideoXVaeConfig
+        scheduler_config = cogVideoXDDIMSchedulerConfig
+        base_path = os.path.join(
+            os.path.dirname(__file__),
+            "configs",
+        )
+        if transformer_type == "fun_2b":
+            transformer_config["in_channels"] = 33
+            base_path = os.path.join(
+                os.path.dirname(__file__),
+                "configs2b-Fun",
+            )
+
+    weight_dtype = None
+    manual_cast_dtype = None
+    _weight_dtype = args.get("weight_dtype")
+
+    if _weight_dtype == "fp8_e4m3fn":
+        weight_dtype = torch.float8_e4m3fn
+        manual_cast_dtype = torch.float16
+    elif _weight_dtype == "fp8_e5m2":
+        weight_dtype = torch.float8_e5m2
+        manual_cast_dtype = torch.bfloat16
+    elif _weight_dtype == "fp16":
+        weight_dtype = torch.float16
+        manual_cast_dtype = torch.float16
+    elif _weight_dtype == "bf16":
+        weight_dtype = torch.bfloat16
+        manual_cast_dtype = torch.bfloat16
+    else:
+        weight_dtype = torch.float32
+        manual_cast_dtype = torch.float32
+
+    print(f"model weight dtype: {weight_dtype} manual cast dtype: {manual_cast_dtype}")
 
     transformer = None
-    if weight_dtype not in ["GGUF"]:
-        if transformer_type == "fun_5b":
-            transformer = CogVideoXTransformer3DModelFun.from_config(
-                transformer_config)
-        else:
-            transformer = CogVideoXTransformer3DModel.from_config(
-                transformer_config)
-
-        transformer.load_state_dict(unet_sd)
-
-    if weight_dtype == "fp8_e4m3fn":
-        dtype = torch.float8_e4m3fn
-        transformer.to(dtype)
-    elif weight_dtype == "fp8_e5m2":
-        dtype = torch.float8_e5m2
-        transformer.to(dtype)
-    elif weight_dtype == "GGUF":
-        dtype = torch.float8_e4m3fn
-        from . import mz_gguf_loader
-        import importlib
-        importlib.reload(mz_gguf_loader)
-        with mz_gguf_loader.quantize_lazy_load():
-            if transformer_type == "fun_5b":
-                transformer = CogVideoXTransformer3DModelFun.from_config(
-                    transformer_config)
-            else:
-                transformer = CogVideoXTransformer3DModel.from_config(
-                    transformer_config)
-            transformer.to(dtype)
-            transformer = mz_gguf_loader.quantize_load_state_dict(
-                transformer, unet_sd, device="cpu")
-            transformer.to(device)
+    CogVideoXTransformer3DModelImp = None
+    if transformer_type.startswith("fun"):
+        CogVideoXTransformer3DModelImp = CogVideoXTransformer3DModelFun
     else:
-        dtype = transformer.parameters().__next__().dtype
+        CogVideoXTransformer3DModelImp = CogVideoXTransformer3DModel
 
-    if dtype == torch.float8_e4m3fn or dtype == torch.float8_e5m2:
+    from . import mz_gguf_loader
+    import importlib
+    importlib.reload(mz_gguf_loader)
+    with mz_gguf_loader.quantize_lazy_load() if is_GGUF else nullcontext():
+        transformer = CogVideoXTransformer3DModelImp.from_config(
+            transformer_config)
+        transformer.to(weight_dtype)
+        if is_GGUF:
+            transformer = mz_gguf_loader.quantize_load_state_dict(
+                transformer, unet_sd, device="cpu", cast_dtype=manual_cast_dtype)
+            transformer.to(device)
+        else:
+            transformer.load_state_dict(unet_sd)
+
+    if weight_dtype == torch.float8_e4m3fn or weight_dtype == torch.float8_e5m2:
         fp8_fast_mode = args.get("fp8_fast_mode", False)
         if fp8_fast_mode:
-            convert_fp8_linear(transformer, dtype)
+            print("convert to fp8 linear")
+            convert_fp8_linear(transformer, weight_dtype, manual_cast_dtype)
 
-    if dyn_offload_cpu_layer > 0:
-        from .mz_dyn_cpu_offload import dyn_cpu_offload_model
-        transformer = dyn_cpu_offload_model(transformer)
-        transformer.register_dyn_cpu_offload_model_hooks(dyn_offload_cpu_layer)
-    else:
-        transformer.to(device)
+        if transformer_type.endswith("2b"):
+            transformer.pos_embedding = transformer.pos_embedding.to(
+                manual_cast_dtype)
+
+    transformer.to(device)
 
     vae_name = args.get("vae_name")
     vae_path = folder_paths.get_full_path("vae", vae_name)
@@ -345,6 +375,8 @@ def MZ_CogVideoXLoader_call(args={}):
     vae_sd = safetensors.torch.load_file(vae_path)
     vae.load_state_dict(vae_sd)
     vae.to(device)
+    # from .mz_dyn_cpu_offload import dyn_cpu_offload_model_vae
+    # vae = dyn_cpu_offload_model_vae(vae)
 
     scheduler = CogVideoXDDIMScheduler.from_config(
         scheduler_config)
@@ -359,7 +391,7 @@ def MZ_CogVideoXLoader_call(args={}):
 
     pipeline = {
         "pipe": pipe,
-        "dtype": torch.bfloat16,
+        "dtype": manual_cast_dtype,
         "base_path": base_path,
         "onediff": False,
         "cpu_offloading": enable_sequential_cpu_offload

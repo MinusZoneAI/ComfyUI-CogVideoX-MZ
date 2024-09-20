@@ -16,7 +16,7 @@ class quantize_lazy_load():
         self.device.__exit__(exc_type, exc_value, traceback)
 
 
-def quantize_load_state_dict(model, state_dict, device="cpu"):
+def quantize_load_state_dict(model, state_dict, device="cpu", cast_dtype=torch.float16):
     Q4_0_qkey = []
     for key in state_dict.keys():
         if key.endswith(".Q4_0_qweight"):
@@ -28,6 +28,7 @@ def quantize_load_state_dict(model, state_dict, device="cpu"):
                 linear=module,
                 device=device,
                 qtype="Q4_0",
+                cast_dtype=cast_dtype,
             )
             set_op_by_name(model, name, q_linear)
 
@@ -56,13 +57,14 @@ import torch.nn.functional as F
 
 class WQLinear_GGUF(nn.Module):
     def __init__(
-        self, in_features, out_features, bias, dev, qtype="Q4_0"
+        self, in_features, out_features, bias, dev, qtype="Q4_0", cast_dtype=torch.float16
     ):
         super().__init__()
 
         self.in_features = in_features
         self.out_features = out_features
         self.qtype = qtype
+        self.cast_dtype = cast_dtype
 
         qweight_shape = quant_shape_to_byte_shape(
             (out_features, in_features), qtype
@@ -80,7 +82,7 @@ class WQLinear_GGUF(nn.Module):
                 "bias",
                 torch.zeros(
                     (out_features),
-                    dtype=torch.float16,
+                    dtype=cast_dtype,
                     device=dev,
                 ),
             )
@@ -92,6 +94,7 @@ class WQLinear_GGUF(nn.Module):
         cls, linear,
         device="cpu",
         qtype="Q4_0",
+        cast_dtype=torch.float16,
     ):
         q_linear = cls(
             linear.in_features,
@@ -99,6 +102,7 @@ class WQLinear_GGUF(nn.Module):
             linear.bias is not None,
             device,
             qtype=qtype,
+            cast_dtype=cast_dtype,
         )
         return q_linear
 
@@ -115,7 +119,6 @@ class WQLinear_GGUF(nn.Module):
 
     @torch.no_grad()
     def forward(self, x):
-        # x = torch.matmul(x, dequantize_blocks_Q4_0(self.qweight))
         if self.qtype == "Q4_0":
             x = F.linear(x, dequantize_blocks_Q4_0(
                 self.Q4_0_qweight, x.dtype), self.bias.to(x.dtype) if self.bias is not None else None)

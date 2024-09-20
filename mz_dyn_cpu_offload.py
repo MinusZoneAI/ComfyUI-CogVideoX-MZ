@@ -26,7 +26,56 @@ def transformer_blocks_to_cuda(m, layer_start=0, layer_size=-1):
                              layer_size].to("cuda")
 
 
+def dyn_cpu_offload_model_vae(vae):
+    # vae = vae.to("cpu")
+    logger.info("vae dtype: " + str(vae.dtype))
+    original_encode = vae.encode
+
+    def encode(cls, x, return_dict: bool = True):
+        x = x.to("cpu") 
+        print("encode: " , x.device , x.dtype)
+        out = original_encode(x, return_dict) 
+        x = x.to("cuda")
+        torch.cuda.empty_cache()
+        return out
+
+    vae.encode = MethodType(encode, vae)
+
+    setattr(vae, "th_to", vae.to)
+
+    def to(self, *args, **kwargs):
+        # for arg in args:
+        #     if isinstance(arg, torch.device):
+        #         continue
+        #     if isinstance(arg, str):
+        #         if arg == "cpu" or arg == "cuda":
+        #             continue
+
+        #     self.th_to(arg)
+        logger.info(f"model.to {args} {kwargs}")
+        return self
+
+    vae.to = MethodType(to, vae)
+    return vae
+
+
 def dyn_cpu_offload_model(model):
+    def pre_to_cuda(module, inp):
+        model.to("cuda")
+        return inp
+
+    model.register_forward_pre_hook(pre_to_cuda)
+
+    def post_to_cpu(module, inp, out):
+        model.to("cpu")
+        return out
+
+    model.register_forward_hook(post_to_cpu)
+
+    return model
+
+
+def _dyn_cpu_offload_model(model):
 
     def generate_transformer_blocks_forward_hook(cls, layer_start, layer_size):
         def pre_blocks_forward_hook(module, inp):
