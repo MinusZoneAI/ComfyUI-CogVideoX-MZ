@@ -18,6 +18,10 @@ Based on https://github.com/kijai/ComfyUI-CogVideoXWrapper add model loader and 
 Prompt :The girl in the video happily puts on sunglasses.
 
 
+https://github.com/user-attachments/assets/3eae12b7-1a2d-40c5-b6fb-10afb1349f4e
+
+
+
 ## Update - 2024-09-19
 支持CogVideoX-Fun图生视频, 提供Q4量化模型
 
