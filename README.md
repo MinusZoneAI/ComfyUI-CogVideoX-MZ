@@ -6,6 +6,17 @@
  
 Based on https://github.com/kijai/ComfyUI-CogVideoXWrapper add model loader and some other features, you need to install ComfyUI-CogVideoXWrapper before using
 
+## Update - 2024-09-22
+支持CogVideoX-I2V图生视频, 提供Q4量化模型
+
+(support CogVideoX-I2V image to video, provide Q4 quantization model)
+
+[CogVideoX_5b_I2V_GGUF_Q4_0.safetensors](https://huggingface.co/Kijai/CogVideoX_GGUF/resolve/main/CogVideoX_5b_I2V_GGUF_Q4_0.safetensors) 下载到unet文件夹 (Donwload to unet folder)
+
+工作流在examples\workflow_I2V_GGUF_Q4_0.png (Workflow in examples\workflow_I2V_GGUF_Q4_0.png)
+
+Prompt :The girl in the video happily puts on sunglasses.
+
 
 ## Update - 2024-09-19
 支持CogVideoX-Fun图生视频, 提供Q4量化模型
@@ -14,7 +25,7 @@ Based on https://github.com/kijai/ComfyUI-CogVideoXWrapper add model loader and 
 
 [CogVideoX_Fun_GGUF_Q4_0.safetensors](https://modelscope.cn/models/wailovet/CogVideoX-5b/resolve/master/CogVideoX_5b_fun_GGUF_Q4_0.safetensors) 下载到unet文件夹 (Donwload to unet folder)
 
-工作流在examples\workflow_I2V_GGUF_Q4_0.png (Workflow in examples\workflow_I2V_GGUF_Q4_0.png)
+工作流在examples\workflow_FUN_I2V_GGUF_Q4_0.png (Workflow in examples\workflow_FUN_I2V_GGUF_Q4_0.png)
 
 Prompt :The girl in the video happily puts on sunglasses.
 

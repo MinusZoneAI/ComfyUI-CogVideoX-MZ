@@ -181,7 +181,7 @@ cogVideoXDDIMSchedulerConfig5B = {
     "set_alpha_to_one": True,
     "snr_shift_scale": 1.0,
     "steps_offset": 0,
-    "timestep_spacing": "linspace",
+    "timestep_spacing": "trailing",
     "trained_betas": None,
 }
 
@@ -266,6 +266,8 @@ def MZ_CogVideoXLoader_call(args={}):
         transformer_type = "fun_2b"
     elif unet_sd["patch_embed.proj.weight"].shape == (1920, 16, 2, 2):
         transformer_type = "2b"
+    elif unet_sd["patch_embed.proj.weight"].shape == (3072, 32, 2, 2):
+        transformer_type = "i2v_5b"
     else:
         raise Exception("This model is not supported")
 
@@ -295,6 +297,13 @@ def MZ_CogVideoXLoader_call(args={}):
             base_path = os.path.join(
                 os.path.dirname(__file__),
                 "configs5b-Fun",
+            )
+        elif transformer_type == "i2v_5b":
+            transformer_config["in_channels"] = 32
+            transformer_config["use_learned_positional_embeddings"] = True
+            base_path = os.path.join(
+                os.path.dirname(__file__),
+                "configs5b-i2v",
             )
 
     if transformer_type.endswith("2b"):
@@ -362,9 +371,14 @@ def MZ_CogVideoXLoader_call(args={}):
             print("convert to fp8 linear")
             convert_fp8_linear(transformer, weight_dtype, manual_cast_dtype)
 
-        if transformer_type.endswith("2b"):
-            transformer.pos_embedding = transformer.pos_embedding.to(
-                manual_cast_dtype)
+        if transformer_type.endswith("2b") or transformer_type == "i2v_5b":
+            if hasattr(transformer, "pos_embedding"):
+                transformer.pos_embedding = transformer.pos_embedding.to(
+                    manual_cast_dtype)
+            if hasattr(transformer, "patch_embed") and hasattr(transformer.patch_embed, "pos_embedding"):
+                transformer.patch_embed.pos_embedding = transformer.patch_embed.pos_embedding.to(
+                    manual_cast_dtype)
+             
 
     transformer.to(device)
 
