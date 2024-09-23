@@ -14,6 +14,7 @@ import safetensors.torch
 
 from .pipeline_cogvideox import CogVideoXPipeline
 from .cogvideox_fun.transformer_3d import CogVideoXTransformer3DModel as CogVideoXTransformer3DModelFun
+from .cogvideox_fun.fun_pab_transformer_3d import CogVideoXTransformer3DModel as CogVideoXTransformer3DModelFunPAB
 from .cogvideox_fun.autoencoder_magvit import AutoencoderKLCogVideoX as AutoencoderKLCogVideoXFun
 from .cogvideox_fun.utils import get_image_to_video_latent, ASPECT_RATIO_512, get_closest_ratio, to_pil
 from .cogvideox_fun.pipeline_cogvideox_inpaint import CogVideoX_Fun_Pipeline_Inpaint
@@ -344,9 +345,13 @@ def MZ_CogVideoXLoader_call(args={}):
     print(
         f"model weight dtype: {weight_dtype} manual cast dtype: {manual_cast_dtype}")
 
+    pab_config = args.get("pab_config", None)
+
     transformer = None
     CogVideoXTransformer3DModelImp = None
-    if transformer_type.startswith("fun"):
+    if pab_config is not None:
+        CogVideoXTransformer3DModelImp = CogVideoXTransformer3DModelFunPAB
+    elif transformer_type.startswith("fun"):
         CogVideoXTransformer3DModelImp = CogVideoXTransformer3DModelFun
     else:
         CogVideoXTransformer3DModelImp = CogVideoXTransformer3DModel
@@ -358,6 +363,11 @@ def MZ_CogVideoXLoader_call(args={}):
         transformer = CogVideoXTransformer3DModelImp.from_config(
             transformer_config)
         transformer.to(weight_dtype)
+        block_edit = args.get("block_edit", None)
+
+        if block_edit is not None:
+            transformer = remove_specific_blocks(transformer, block_edit)
+
         if is_GGUF:
             transformer = mz_gguf_loader.quantize_load_state_dict(
                 transformer, unet_sd, device="cpu", cast_dtype=manual_cast_dtype)
@@ -378,7 +388,6 @@ def MZ_CogVideoXLoader_call(args={}):
             if hasattr(transformer, "patch_embed") and hasattr(transformer.patch_embed, "pos_embedding"):
                 transformer.patch_embed.pos_embedding = transformer.patch_embed.pos_embedding.to(
                     manual_cast_dtype)
-             
 
     transformer.to(device)
 
@@ -391,6 +400,12 @@ def MZ_CogVideoXLoader_call(args={}):
     vae_sd = safetensors.torch.load_file(vae_path)
     vae.load_state_dict(vae_sd)
     vae.to(device)
+
+    enable_vae_encode_tiling = args.get("enable_vae_encode_tiling", False)
+    if enable_vae_encode_tiling:
+        from .mz_enable_vae_encode_tiling import enable_vae_encode_tiling
+        enable_vae_encode_tiling(vae)
+
     # from .mz_dyn_cpu_offload import dyn_cpu_offload_model_vae
     # vae = dyn_cpu_offload_model_vae(vae)
 
@@ -398,9 +413,11 @@ def MZ_CogVideoXLoader_call(args={}):
         scheduler_config)
 
     if transformer_type.startswith("fun"):
-        pipe = CogVideoX_Fun_Pipeline_Inpaint(vae, transformer, scheduler)
+        pipe = CogVideoX_Fun_Pipeline_Inpaint(
+            vae, transformer, scheduler, pab_config=pab_config)
     else:
-        pipe = CogVideoXPipeline(vae, transformer, scheduler)
+        pipe = CogVideoXPipeline(
+            vae, transformer, scheduler, pab_config=pab_config)
 
     if enable_sequential_cpu_offload:
         pipe.enable_sequential_cpu_offload()
@@ -414,3 +431,13 @@ def MZ_CogVideoXLoader_call(args={}):
         "scheduler_config": scheduler_config,
     }
     return (pipeline, )
+
+
+def remove_specific_blocks(model, block_indices_to_remove):
+    import torch.nn as nn
+    transformer_blocks = model.transformer_blocks
+    new_blocks = [block for i, block in enumerate(
+        transformer_blocks) if i not in block_indices_to_remove]
+    model.transformer_blocks = nn.ModuleList(new_blocks)
+
+    return model

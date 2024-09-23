@@ -30,7 +30,13 @@ class MZ_CogVideoXLoader:
                 "fp8_fast_mode": ("BOOLEAN", {"default": False}),
                 # "dyn_offload_cpu_layer": ("INT", {"default": 0, "tooltip": "0-42,默认0不启用"}),
                 "enable_sequential_cpu_offload": ("BOOLEAN", {"default": False, "tooltip": "significantly reducing memory usage and slows down the inference"}),
-            }}
+                "enable_vae_encode_tiling": ("BOOLEAN", {"default": False}),
+            },
+            "optional": {
+                "pab_config": ("PAB_CONFIG", {"default": None}),
+                "block_edit": ("TRANSFORMERBLOCKS", {"default": None}),
+            }
+        }
 
     RETURN_TYPES = ("COGVIDEOPIPE",)
     RETURN_NAMES = ("cogvideo_pipe", )

@@ -21,7 +21,6 @@ from typing import Callable, Dict, List, Optional, Tuple, Union
 import torch
 import torch.nn.functional as F
 from einops import rearrange
-from transformers import T5EncoderModel, T5Tokenizer
 
 from diffusers.callbacks import MultiPipelineCallbacks, PipelineCallback
 from diffusers.models import AutoencoderKLCogVideoX, CogVideoXTransformer3DModel
@@ -33,6 +32,10 @@ from diffusers.utils.torch_utils import randn_tensor
 from diffusers.video_processor import VideoProcessor
 from diffusers.image_processor import VaeImageProcessor
 from einops import rearrange
+
+from ..videosys.core.pipeline import VideoSysPipeline
+from ..videosys.cogvideox_transformer_3d import CogVideoXTransformer3DModel as CogVideoXTransformer3DModelPAB
+from ..videosys.core.pab_mgr import set_pab_manager
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
@@ -192,7 +195,7 @@ class CogVideoX_Fun_PipelineOutput(BaseOutput):
     videos: torch.Tensor
 
 
-class CogVideoX_Fun_Pipeline_Inpaint(DiffusionPipeline):
+class CogVideoX_Fun_Pipeline_Inpaint(VideoSysPipeline):
     r"""
     Pipeline for text-to-video generation using CogVideoX.
 
@@ -209,7 +212,7 @@ class CogVideoX_Fun_Pipeline_Inpaint(DiffusionPipeline):
     """
 
     _optional_components = []
-    model_cpu_offload_seq = "text_encoder->vae->transformer->vae"
+    model_cpu_offload_seq = ">vae->transformer->vae"
 
     _callback_tensor_inputs = [
         "latents",
@@ -222,6 +225,7 @@ class CogVideoX_Fun_Pipeline_Inpaint(DiffusionPipeline):
         vae: AutoencoderKLCogVideoX,
         transformer: CogVideoXTransformer3DModel,
         scheduler: Union[CogVideoXDDIMScheduler, CogVideoXDPMScheduler],
+        pab_config = None
     ):
         super().__init__()
 
@@ -242,6 +246,9 @@ class CogVideoX_Fun_Pipeline_Inpaint(DiffusionPipeline):
         self.mask_processor = VaeImageProcessor(
             vae_scale_factor=self.vae_scale_factor, do_normalize=False, do_binarize=True, do_convert_grayscale=True
         )
+
+        if pab_config is not None:
+            set_pab_manager(pab_config)
 
     def prepare_latents(
         self, 
@@ -631,7 +638,7 @@ class CogVideoX_Fun_Pipeline_Inpaint(DiffusionPipeline):
 
         device = self._execution_device
 
-        self.vae.to(device)
+        #self.vae.to(device)
 
         # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
         # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`

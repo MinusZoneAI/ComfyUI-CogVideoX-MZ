@@ -32,9 +32,9 @@ def dyn_cpu_offload_model_vae(vae):
     original_encode = vae.encode
 
     def encode(cls, x, return_dict: bool = True):
-        x = x.to("cpu") 
-        print("encode: " , x.device , x.dtype)
-        out = original_encode(x, return_dict) 
+        x = x.to("cpu")
+        print("encode: ", x.device, x.dtype)
+        out = original_encode(x, return_dict)
         x = x.to("cuda")
         torch.cuda.empty_cache()
         return out
@@ -76,7 +76,6 @@ def dyn_cpu_offload_model(model):
 
 
 def _dyn_cpu_offload_model(model):
-
     def generate_transformer_blocks_forward_hook(cls, layer_start, layer_size):
         def pre_blocks_forward_hook(module, inp):
             # 当前显存占用
