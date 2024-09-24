@@ -20,12 +20,15 @@ def encode(
             The latent representations of the encoded videos. If `return_dict` is True, a
             [`~models.autoencoder_kl.AutoencoderKLOutput`] is returned, otherwise a plain `tuple` is returned.
     """
+
+    self._clear_fake_context_parallel_cache()
     if self.use_slicing and x.shape[0] > 1:
         encoded_slices = [self._encode(x_slice) for x_slice in x.split(1)]
         h = torch.cat(encoded_slices)
     else:
         h = self._encode(x)
     posterior = DiagonalGaussianDistribution(h)
+    self._clear_fake_context_parallel_cache()
 
     if not return_dict:
         return (posterior,)
@@ -182,7 +185,7 @@ def enable_vae_encode_tiling(vae):
     setattr(vae, "_encode", MethodType(_encode, vae))
     setattr(vae, "tiled_encode", MethodType(tiled_encode, vae))
     setattr(vae, "use_encode_tiling", True)
-    
+
     setattr(vae, "enable_encode_tiling", MethodType(enable_encode_tiling, vae))
     vae.enable_encode_tiling()
     return vae
