@@ -20,15 +20,15 @@ def encode(
             The latent representations of the encoded videos. If `return_dict` is True, a
             [`~models.autoencoder_kl.AutoencoderKLOutput`] is returned, otherwise a plain `tuple` is returned.
     """
-
-    self._clear_fake_context_parallel_cache()
+    
+    # print("encode shape xx: ", x.shape) 
     if self.use_slicing and x.shape[0] > 1:
         encoded_slices = [self._encode(x_slice) for x_slice in x.split(1)]
         h = torch.cat(encoded_slices)
     else:
         h = self._encode(x)
-    posterior = DiagonalGaussianDistribution(h)
-    self._clear_fake_context_parallel_cache()
+    # print("encode shape: ", h.shape)
+    posterior = DiagonalGaussianDistribution(h) 
 
     if not return_dict:
         return (posterior,)
@@ -50,16 +50,16 @@ def tiled_encode(self, x: torch.Tensor) -> torch.Tensor:
     """
     # For a rough memory estimate, take a look at the `tiled_decode` method.
     batch_size, num_channels, num_frames, height, width = x.shape
-    overlap_height = int(self.tile_sample_min_height *
-                         (1 - self.tile_overlap_factor_height))
-    overlap_width = int(self.tile_sample_min_width *
-                        (1 - self.tile_overlap_factor_width))
+    overlap_height = int(self.encode_tile_sample_min_height *
+                         (1 - self.encode_tile_overlap_factor_height))
+    overlap_width = int(self.encode_tile_sample_min_width *
+                        (1 - self.encode_tile_overlap_factor_width))
     blend_extent_height = int(
-        self.tile_latent_min_height * self.tile_overlap_factor_height)
+        self.encode_tile_latent_min_height * self.encode_tile_overlap_factor_height)
     blend_extent_width = int(
-        self.tile_latent_min_width * self.tile_overlap_factor_width)
-    row_limit_height = self.tile_latent_min_height - blend_extent_height
-    row_limit_width = self.tile_latent_min_width - blend_extent_width
+        self.encode_tile_latent_min_width * self.encode_tile_overlap_factor_width)
+    row_limit_height = self.encode_tile_latent_min_height - blend_extent_height
+    row_limit_width = self.encode_tile_latent_min_width - blend_extent_width
     frame_batch_size = 4
     # Split x into overlapping tiles and encode them separately.
     # The tiles have an overlap to avoid seams between tiles.
@@ -79,8 +79,8 @@ def tiled_encode(self, x: torch.Tensor) -> torch.Tensor:
                     :,
                     :,
                     start_frame:end_frame,
-                    i: i + self.tile_sample_min_height,
-                    j: j + self.tile_sample_min_width,
+                    i: i + self.encode_tile_sample_min_height,
+                    j: j + self.encode_tile_sample_min_width,
                 ]
                 tile = self.encoder(tile)
                 if self.quant_conv is not None:
@@ -112,7 +112,7 @@ def _encode(
 ):
     batch_size, num_channels, num_frames, height, width = x.shape
 
-    if self.use_encode_tiling and (width > self.tile_sample_min_width or height > self.tile_sample_min_height):
+    if self.use_encode_tiling and (width > self.encode_tile_sample_min_width or height > self.encode_tile_sample_min_height):
         return self.tiled_encode(x)
 
     if num_frames == 1:
@@ -165,16 +165,22 @@ def enable_encode_tiling(
             value might cause more tiles to be processed leading to slow down of the decoding process.
     """
     self.use_encode_tiling = True
-    self.tile_sample_min_height = tile_sample_min_height or self.tile_sample_min_height
-    self.tile_sample_min_width = tile_sample_min_width or self.tile_sample_min_width
-    self.tile_latent_min_height = int(
-        self.tile_sample_min_height /
+    self.encode_tile_sample_min_height = tile_sample_min_height or self.tile_sample_min_height
+    print("encode_tile_sample_min_height: ", self.encode_tile_sample_min_height)
+    self.encode_tile_sample_min_width = tile_sample_min_width or self.tile_sample_min_width
+    print("encode_tile_sample_min_width: ", self.encode_tile_sample_min_width)
+    self.encode_tile_latent_min_height = int(
+        self.encode_tile_sample_min_height /
         (2 ** (len(self.config.block_out_channels) - 1))
     )
-    self.tile_latent_min_width = int(
-        self.tile_sample_min_width / (2 ** (len(self.config.block_out_channels) - 1)))
-    self.tile_overlap_factor_height = tile_overlap_factor_height or self.tile_overlap_factor_height
-    self.tile_overlap_factor_width = tile_overlap_factor_width or self.tile_overlap_factor_width
+    self.encode_tile_latent_min_width = int(
+        self.encode_tile_sample_min_width / (2 ** (len(self.config.block_out_channels) - 1)))
+    print("encode_tile_latent_min_height: ", self.encode_tile_latent_min_height)
+    print("encode_tile_latent_min_width: ", self.encode_tile_latent_min_width)
+    self.encode_tile_overlap_factor_height = tile_overlap_factor_height or self.tile_overlap_factor_height
+    print("encode_tile_overlap_factor_height: ", self.encode_tile_overlap_factor_height)
+    self.encode_tile_overlap_factor_width = tile_overlap_factor_width or self.tile_overlap_factor_width
+    print("encode_tile_overlap_factor_width: ", self.encode_tile_overlap_factor_width)
 
 
 from types import MethodType
@@ -185,7 +191,6 @@ def enable_vae_encode_tiling(vae):
     setattr(vae, "_encode", MethodType(_encode, vae))
     setattr(vae, "tiled_encode", MethodType(tiled_encode, vae))
     setattr(vae, "use_encode_tiling", True)
-
     setattr(vae, "enable_encode_tiling", MethodType(enable_encode_tiling, vae))
     vae.enable_encode_tiling()
     return vae
