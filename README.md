@@ -6,6 +6,12 @@
  
 Based on https://github.com/kijai/ComfyUI-CogVideoXWrapper add model loader and some other features, you need to install ComfyUI-CogVideoXWrapper before using
 
+## Update - 2024-09-24
+添加vae encode tiling开关, 在16G显存下可以生成1024分辨率的视频不会OOM
+
+(add vae encode tiling switch, can generate 1024 resolution video without OOM on 16G vram)
+
+
 ## Update - 2024-09-22
 支持CogVideoX-I2V图生视频, 提供Q4量化模型
 
