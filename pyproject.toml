@@ -1,0 +1,14 @@
+[project]
+name = "comfyui-cogvideox-mz"
+description = "Nodes:MZ_CogVideoXLoader"
+version = "1.0.0"
+license = {file = "LICENSE"}
+
+[project.urls]
+Repository = "https://github.com/MinusZoneAI/ComfyUI-CogVideoX-MZ"
+#  Used by Comfy Registry https://comfyregistry.org
+
+[tool.comfy]
+PublisherId = ""
+DisplayName = "ComfyUI-CogVideoX-MZ"
+Icon = ""
