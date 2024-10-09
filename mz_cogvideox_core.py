@@ -18,7 +18,9 @@ from .cogvideox_fun.fun_pab_transformer_3d import CogVideoXTransformer3DModel as
 from .cogvideox_fun.autoencoder_magvit import AutoencoderKLCogVideoX as AutoencoderKLCogVideoXFun
 from .cogvideox_fun.utils import get_image_to_video_latent, ASPECT_RATIO_512, get_closest_ratio, to_pil
 from .cogvideox_fun.pipeline_cogvideox_inpaint import CogVideoX_Fun_Pipeline_Inpaint
-from diffusers.models import AutoencoderKLCogVideoX, CogVideoXTransformer3DModel
+# from diffusers.models import AutoencoderKLCogVideoX, CogVideoXTransformer3DModel
+from diffusers.models import AutoencoderKLCogVideoX
+from .custom_cogvideox_transformer_3d import CogVideoXTransformer3DModel
 from diffusers.schedulers import CogVideoXDDIMScheduler
 
 

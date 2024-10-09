@@ -387,6 +387,8 @@ class CogVideoXPipeline(VideoSysPipeline):
         context_stride: Optional[int] = None,
         context_overlap: Optional[int] = None,
         freenoise: Optional[bool] = True,
+        controlnet: Optional[dict] = None,
+        
     ):
         """
         Function invoked when calling the pipeline for generation.
@@ -536,7 +538,7 @@ class CogVideoXPipeline(VideoSysPipeline):
         num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
         comfy_pbar = ProgressBar(num_inference_steps)
 
-        # 8.5. Temporal tiling prep
+        # 8. context schedule and temporal tiling
         if context_schedule is not None and context_schedule == "temporal_tiling":
             t_tile_length = context_frames
             t_tile_overlap = context_overlap
@@ -562,7 +564,34 @@ class CogVideoXPipeline(VideoSysPipeline):
                 if self.transformer.config.use_rotary_positional_embeddings
                 else None
             )
-        
+        # 9. Controlnet
+
+        if controlnet is not None:
+            self.controlnet = controlnet["control_model"].to(device)
+            if self.transformer.dtype == torch.float8_e4m3fn:
+                for name, param in self.controlnet.named_parameters():
+                    if "patch_embed" not in name and param.data.dtype != torch.float8_e4m3fn:
+                        param.data = param.data.to(torch.float8_e4m3fn)
+            else:
+                self.controlnet.to(self.transformer.dtype)
+            
+            if getattr(self.transformer, 'fp8_matmul_enabled', False):
+                from .fp8_optimization import convert_fp8_linear
+                if not hasattr(self.controlnet, 'fp8_matmul_enabled') or not self.controlnet.fp8_matmul_enabled:
+                    convert_fp8_linear(self.controlnet, torch.float16)
+                    setattr(self.controlnet, "fp8_matmul_enabled", True)
+            
+            control_frames = controlnet["control_frames"].to(device).to(self.controlnet.dtype).contiguous()
+            control_frames = torch.cat([control_frames] * 2) if do_classifier_free_guidance else control_frames
+            control_weights = controlnet["control_weights"]
+            print("Controlnet enabled with weights: ", control_weights)
+            control_start = controlnet["control_start"]
+            control_end = controlnet["control_end"]
+        else:
+            controlnet_states = None
+            control_weights= None
+
+        # 10. Denoising loop
         with self.progress_bar(total=num_inference_steps) as progress_bar:    
             old_pred_original_sample = None # for DPM-solver++
             for i, t in enumerate(timesteps):
@@ -666,8 +695,6 @@ class CogVideoXPipeline(VideoSysPipeline):
                     latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
                     counter = torch.zeros_like(latent_model_input)
                     noise_pred = torch.zeros_like(latent_model_input)
-                    if do_classifier_free_guidance:
-                        noise_uncond = torch.zeros_like(latent_model_input)
                     
                     if image_cond_latents is not None:
                         latent_image_input = torch.cat([image_cond_latents] * 2) if do_classifier_free_guidance else image_cond_latents
@@ -676,39 +703,79 @@ class CogVideoXPipeline(VideoSysPipeline):
                     # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                     timestep = t.expand(latent_model_input.shape[0])
 
-                    context_queue = list(context(
-                        i, num_inference_steps, latents.shape[1], context_frames, context_stride, context_overlap,
-                    ))                    
+                    current_step_percentage = i / num_inference_steps
 
+                    # use same rotary embeddings for all context windows
                     image_rotary_emb = (
                             self._prepare_rotary_positional_embeddings(height, width, context_frames, device)
                             if self.transformer.config.use_rotary_positional_embeddings
                             else None
                         )
 
-                    for c in context_queue:
-                        partial_latent_model_input = latent_model_input[:, c, :, :, :]
-                        # predict noise model_output
-                        noise_pred[:, c, :, :, :] += self.transformer(
-                            hidden_states=partial_latent_model_input,
-                            encoder_hidden_states=prompt_embeds,
-                            timestep=timestep,
-                            image_rotary_emb=image_rotary_emb,
-                            return_dict=False,
-                        )[0]
+                    context_queue = list(context(
+                        i, num_inference_steps, latents.shape[1], context_frames, context_stride, context_overlap,
+                    ))
 
-                        # uncond
-                        if do_classifier_free_guidance:
-                            noise_uncond[:, c, :, :, :] += self.transformer(
+                    if controlnet is not None:
+                        # controlnet frames are not temporally compressed, so try to match the context frames that are
+                        control_context_queue = list(context(
+                            i, 
+                            num_inference_steps, 
+                            control_frames.shape[1], 
+                            context_frames * self.vae_scale_factor_temporal, 
+                            context_stride * self.vae_scale_factor_temporal, 
+                            context_overlap * self.vae_scale_factor_temporal,
+                        ))
+
+                        for c, control_c in zip(context_queue, control_context_queue):
+                            partial_latent_model_input = latent_model_input[:, c, :, :, :]
+                            partial_control_frames = control_frames[:, control_c, :, :, :]
+
+                            controlnet_states = None
+                        
+                            if (control_start <= current_step_percentage <= control_end):
+                                # extract controlnet hidden state
+                                controlnet_states = self.controlnet(
+                                    hidden_states=partial_latent_model_input,
+                                    encoder_hidden_states=prompt_embeds,
+                                    image_rotary_emb=image_rotary_emb,
+                                    controlnet_states=partial_control_frames,
+                                    timestep=timestep,
+                                    return_dict=False,
+                                )[0]
+                                if isinstance(controlnet_states, (tuple, list)):
+                                    controlnet_states = [x.to(dtype=self.controlnet.dtype) for x in controlnet_states]
+                                else:
+                                    controlnet_states = controlnet_states.to(dtype=self.controlnet.dtype)
+    
+                            # predict noise model_output
+                            noise_pred[:, c, :, :, :] += self.transformer(
                                 hidden_states=partial_latent_model_input,
                                 encoder_hidden_states=prompt_embeds,
                                 timestep=timestep,
                                 image_rotary_emb=image_rotary_emb,
                                 return_dict=False,
+                                controlnet_states=controlnet_states,
+                                controlnet_weights=control_weights,
                             )[0]
 
-                        counter[:, c, :, :, :] += 1
-                        noise_pred = noise_pred.float()
+                            counter[:, c, :, :, :] += 1
+                            noise_pred = noise_pred.float()
+                    else:
+                        for c in context_queue:
+                            partial_latent_model_input = latent_model_input[:, c, :, :, :]
+    
+                            # predict noise model_output
+                            noise_pred[:, c, :, :, :] += self.transformer(
+                                hidden_states=partial_latent_model_input,
+                                encoder_hidden_states=prompt_embeds,
+                                timestep=timestep,
+                                image_rotary_emb=image_rotary_emb,
+                                return_dict=False
+                            )[0]
+
+                            counter[:, c, :, :, :] += 1
+                            noise_pred = noise_pred.float()
                         
                     noise_pred /= counter
                     if do_classifier_free_guidance:
@@ -744,6 +811,26 @@ class CogVideoXPipeline(VideoSysPipeline):
 
                     # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                     timestep = t.expand(latent_model_input.shape[0])
+
+                    current_step_percentage = i / num_inference_steps
+
+                    if controlnet is not None:
+                        controlnet_states = None
+                        if (control_start <= current_step_percentage <= control_end):
+                            # extract controlnet hidden state
+                            controlnet_states = self.controlnet(
+                                hidden_states=latent_model_input,
+                                encoder_hidden_states=prompt_embeds,
+                                image_rotary_emb=image_rotary_emb,
+                                controlnet_states=control_frames,
+                                timestep=timestep,
+                                return_dict=False,
+                            )[0]
+                            if isinstance(controlnet_states, (tuple, list)):
+                                controlnet_states = [x.to(dtype=self.vae.dtype) for x in controlnet_states]
+                            else:
+                                controlnet_states = controlnet_states.to(dtype=self.vae.dtype)                       
+
                     # predict noise model_output
                     noise_pred = self.transformer(
                         hidden_states=latent_model_input,
@@ -751,6 +838,8 @@ class CogVideoXPipeline(VideoSysPipeline):
                         timestep=timestep,
                         image_rotary_emb=image_rotary_emb,
                         return_dict=False,
+                        controlnet_states=controlnet_states,
+                        controlnet_weights=control_weights,
                     )[0]
                     noise_pred = noise_pred.float()
 
