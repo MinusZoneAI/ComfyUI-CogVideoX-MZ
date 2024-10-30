@@ -20,9 +20,10 @@ from torch import nn
 import torch.nn.functional as F
 
 import numpy as np
+from einops import rearrange
 
 from diffusers.configuration_utils import ConfigMixin, register_to_config
-from diffusers.utils import is_torch_version, logging
+from diffusers.utils import logging
 from diffusers.utils.torch_utils import maybe_allow_in_graph
 from diffusers.models.attention import Attention, FeedForward
 from diffusers.models.attention_processor import AttentionProcessor
@@ -36,11 +37,28 @@ logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 try:
     from sageattention import sageattn
-    SAGEATTN_IS_AVAVILABLE = True
+    SAGEATTN_IS_AVAILABLE = True
     logger.info("Using sageattn")
 except:
     logger.info("sageattn not found, using sdpa")
-    SAGEATTN_IS_AVAVILABLE = False
+    SAGEATTN_IS_AVAILABLE = False
+
+def fft(tensor):
+    tensor_fft = torch.fft.fft2(tensor)
+    tensor_fft_shifted = torch.fft.fftshift(tensor_fft)
+    B, C, H, W = tensor.size()
+    radius = min(H, W) // 5
+            
+    Y, X = torch.meshgrid(torch.arange(H), torch.arange(W))
+    center_x, center_y = W // 2, H // 2
+    mask = (X - center_x) ** 2 + (Y - center_y) ** 2 <= radius ** 2
+    low_freq_mask = mask.unsqueeze(0).unsqueeze(0).to(tensor.device)
+    high_freq_mask = ~low_freq_mask
+            
+    low_freq_fft = tensor_fft_shifted * low_freq_mask
+    high_freq_fft = tensor_fft_shifted * high_freq_mask
+
+    return low_freq_fft, high_freq_fft
 
 class CogVideoXAttnProcessor2_0:
     r"""
@@ -51,7 +69,7 @@ class CogVideoXAttnProcessor2_0:
     def __init__(self):
         if not hasattr(F, "scaled_dot_product_attention"):
             raise ImportError("CogVideoXAttnProcessor requires PyTorch 2.0, to use it, please upgrade PyTorch to 2.0.")
-
+    @torch.compiler.disable()
     def __call__(
         self,
         attn: Attention,
@@ -96,7 +114,7 @@ class CogVideoXAttnProcessor2_0:
             if not attn.is_cross_attention:
                 key[:, :, text_seq_length:] = apply_rotary_emb(key[:, :, text_seq_length:], image_rotary_emb)
 
-        if SAGEATTN_IS_AVAVILABLE:
+        if SAGEATTN_IS_AVAILABLE:
             hidden_states = sageattn(query, key, value, is_causal=False)
         else:
             hidden_states = F.scaled_dot_product_attention(
@@ -125,7 +143,7 @@ class FusedCogVideoXAttnProcessor2_0:
     def __init__(self):
         if not hasattr(F, "scaled_dot_product_attention"):
             raise ImportError("CogVideoXAttnProcessor requires PyTorch 2.0, to use it, please upgrade PyTorch to 2.0.")
-
+    @torch.compiler.disable()
     def __call__(
         self,
         attn: Attention,
@@ -170,7 +188,7 @@ class FusedCogVideoXAttnProcessor2_0:
             if not attn.is_cross_attention:
                 key[:, :, text_seq_length:] = apply_rotary_emb(key[:, :, text_seq_length:], image_rotary_emb)
 
-        if SAGEATTN_IS_AVAVILABLE:
+        if SAGEATTN_IS_AVAILABLE:
             hidden_states = sageattn(query, key, value, is_causal=False)
         else:
             hidden_states = F.scaled_dot_product_attention(
@@ -191,6 +209,7 @@ class FusedCogVideoXAttnProcessor2_0:
     
 @maybe_allow_in_graph
 class CogVideoXBlock(nn.Module):
+    
     r"""
     Transformer block used in [CogVideoX](https://github.com/THUDM/CogVideo) model.
 
@@ -269,27 +288,60 @@ class CogVideoXBlock(nn.Module):
             inner_dim=ff_inner_dim,
             bias=ff_bias,
         )
-
+        self.cached_hidden_states = []
+        self.cached_encoder_hidden_states = []
+        
     def forward(
         self,
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor,
         temb: torch.Tensor,
         image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        video_flow_feature: Optional[torch.Tensor] = None,
+        fuser=None,
+        fastercache_counter=0,
+        fastercache_start_step=15,
+        fastercache_device="cuda:0",
     ) -> torch.Tensor:
         text_seq_length = encoder_hidden_states.size(1)
-
         # norm & modulate
         norm_hidden_states, norm_encoder_hidden_states, gate_msa, enc_gate_msa = self.norm1(
             hidden_states, encoder_hidden_states, temb
         )
-
-        # attention
-        attn_hidden_states, attn_encoder_hidden_states = self.attn1(
-            hidden_states=norm_hidden_states,
-            encoder_hidden_states=norm_encoder_hidden_states,
-            image_rotary_emb=image_rotary_emb,
-        )
+        # Tora Motion-guidance Fuser
+        if video_flow_feature is not None:
+            H, W = video_flow_feature.shape[-2:]
+            T = norm_hidden_states.shape[1] // H // W
+            h = rearrange(norm_hidden_states, "B (T H W) C -> (B T) C H W", H=H, W=W)
+            h = fuser(h, video_flow_feature.to(h), T=T)
+            norm_hidden_states = rearrange(h, "(B T) C H W ->  B (T H W) C", T=T)
+            del h, fuser        
+        
+        #fastercache
+        B = norm_hidden_states.shape[0]
+        if fastercache_counter >= fastercache_start_step + 3 and fastercache_counter%3!=0 and self.cached_hidden_states[-1].shape[0] >= B:
+            attn_hidden_states = (
+                self.cached_hidden_states[1][:B] + 
+                (self.cached_hidden_states[1][:B] - self.cached_hidden_states[0][:B]) 
+                * 0.3
+                ).to(norm_hidden_states.device, non_blocking=True)
+            attn_encoder_hidden_states = (
+                self.cached_encoder_hidden_states[1][:B] + 
+                (self.cached_encoder_hidden_states[1][:B] - self.cached_encoder_hidden_states[0][:B])
+                 * 0.3
+                ).to(norm_hidden_states.device, non_blocking=True)
+        else:
+            attn_hidden_states, attn_encoder_hidden_states = self.attn1(
+                hidden_states=norm_hidden_states,
+                encoder_hidden_states=norm_encoder_hidden_states,
+                image_rotary_emb=image_rotary_emb,
+            )
+            if fastercache_counter == fastercache_start_step:
+                self.cached_hidden_states = [attn_hidden_states.to(fastercache_device), attn_hidden_states.to(fastercache_device)]
+                self.cached_encoder_hidden_states = [attn_encoder_hidden_states.to(fastercache_device), attn_encoder_hidden_states.to(fastercache_device)]
+            elif fastercache_counter > fastercache_start_step:
+                self.cached_hidden_states[-1].copy_(attn_hidden_states.to(fastercache_device))
+                self.cached_encoder_hidden_states[-1].copy_(attn_encoder_hidden_states.to(fastercache_device))
 
         hidden_states = hidden_states + gate_msa * attn_hidden_states
         encoder_hidden_states = encoder_hidden_states + enc_gate_msa * attn_encoder_hidden_states
@@ -458,6 +510,14 @@ class CogVideoXTransformer3DModel(ModelMixin, ConfigMixin):
 
         self.gradient_checkpointing = False
 
+        self.fuser_list = None
+        self.use_fastercache = False
+        self.fastercache_counter = 0
+        self.fastercache_start_step = 15
+        self.fastercache_lf_step = 40
+        self.fastercache_hf_step = 30
+        self.fastercache_device = "cuda"
+
     def _set_gradient_checkpointing(self, module, value=False):
         self.gradient_checkpointing = value
 
@@ -570,6 +630,7 @@ class CogVideoXTransformer3DModel(ModelMixin, ConfigMixin):
         image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         controlnet_states: torch.Tensor = None,
         controlnet_weights: Optional[Union[float, int, list, np.ndarray, torch.FloatTensor]] = 1.0,
+        video_flow_features: Optional[torch.Tensor] = None,
         return_dict: bool = True,
     ):
         batch_size, num_frames, channels, height, width = hidden_states.shape
@@ -591,32 +652,82 @@ class CogVideoXTransformer3DModel(ModelMixin, ConfigMixin):
         text_seq_length = encoder_hidden_states.shape[1]
         encoder_hidden_states = hidden_states[:, :text_seq_length]
         hidden_states = hidden_states[:, text_seq_length:]
+        if self.use_fastercache:
+            self.fastercache_counter+=1
+        if self.fastercache_counter >= self.fastercache_start_step + 3 and self.fastercache_counter % 5 !=0:
+            # 3. Transformer blocks
+            for i, block in enumerate(self.transformer_blocks):
+                    hidden_states, encoder_hidden_states = block(
+                        hidden_states=hidden_states[:1],
+                        encoder_hidden_states=encoder_hidden_states[:1],
+                        temb=emb[:1],
+                        image_rotary_emb=image_rotary_emb,
+                        video_flow_feature=video_flow_features[i][:1] if video_flow_features is not None else None,
+                        fuser = self.fuser_list[i] if self.fuser_list is not None else None,
+                        fastercache_counter = self.fastercache_counter,
+                        fastercache_device = self.fastercache_device
+                    )
 
-        # 3. Transformer blocks
-        for i, block in enumerate(self.transformer_blocks):
-            if self.training and self.gradient_checkpointing:
-
-                def create_custom_forward(module):
-                    def custom_forward(*inputs):
-                        return module(*inputs)
-
-                    return custom_forward
-
-                ckpt_kwargs: Dict[str, Any] = {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
-                hidden_states, encoder_hidden_states = torch.utils.checkpoint.checkpoint(
-                    create_custom_forward(block),
-                    hidden_states,
-                    encoder_hidden_states,
-                    emb,
-                    image_rotary_emb,
-                    **ckpt_kwargs,
-                )
+                    if (controlnet_states is not None) and (i < len(controlnet_states)):
+                        controlnet_states_block = controlnet_states[i]
+                        controlnet_block_weight = 1.0
+                        if isinstance(controlnet_weights, (list, np.ndarray)) or torch.is_tensor(controlnet_weights):
+                            controlnet_block_weight = controlnet_weights[i]
+                        elif isinstance(controlnet_weights, (float, int)):
+                            controlnet_block_weight = controlnet_weights
+                        
+                        hidden_states = hidden_states + controlnet_states_block * controlnet_block_weight
+                    
+            if not self.config.use_rotary_positional_embeddings:
+                # CogVideoX-2B
+                hidden_states = self.norm_final(hidden_states)
             else:
+                # CogVideoX-5B
+                hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
+                hidden_states = self.norm_final(hidden_states)
+                hidden_states = hidden_states[:, text_seq_length:]
+
+            # 4. Final block
+            hidden_states = self.norm_out(hidden_states, temb=emb[:1])
+            hidden_states = self.proj_out(hidden_states)
+
+            # 5. Unpatchify
+            # Note: we use `-1` instead of `channels`:
+            #   - It is okay to `channels` use for CogVideoX-2b and CogVideoX-5b (number of input channels is equal to output channels)
+            #   - However, for CogVideoX-5b-I2V also takes concatenated input image latents (number of input channels is twice the output channels)
+            p = self.config.patch_size
+            output = hidden_states.reshape(1, num_frames, height // p, width // p, -1, p, p)
+            output = output.permute(0, 1, 4, 2, 5, 3, 6).flatten(5, 6).flatten(3, 4)
+            
+            (bb, tt, cc, hh, ww) = output.shape
+            cond = rearrange(output, "B T C H W -> (B T) C H W", B=bb, C=cc, T=tt, H=hh, W=ww)
+            lf_c, hf_c = fft(cond.float())
+            #lf_step = 40
+            #hf_step = 30
+            if self.fastercache_counter <= self.fastercache_lf_step:
+                self.delta_lf = self.delta_lf * 1.1
+            if self.fastercache_counter >= self.fastercache_hf_step:
+                self.delta_hf = self.delta_hf * 1.1
+   
+            new_hf_uc = self.delta_hf + hf_c
+            new_lf_uc = self.delta_lf + lf_c
+
+            combine_uc = new_lf_uc + new_hf_uc
+            combined_fft = torch.fft.ifftshift(combine_uc)
+            recovered_uncond = torch.fft.ifft2(combined_fft).real
+            recovered_uncond = rearrange(recovered_uncond.to(output.dtype), "(B T) C H W -> B T C H W", B=bb, C=cc, T=tt, H=hh, W=ww)
+            output = torch.cat([output, recovered_uncond])
+        else:
+            for i, block in enumerate(self.transformer_blocks):
                 hidden_states, encoder_hidden_states = block(
                     hidden_states=hidden_states,
                     encoder_hidden_states=encoder_hidden_states,
                     temb=emb,
                     image_rotary_emb=image_rotary_emb,
+                    video_flow_feature=video_flow_features[i] if video_flow_features is not None else None,
+                    fuser = self.fuser_list[i] if self.fuser_list is not None else None,
+                    fastercache_counter = self.fastercache_counter,
+                    fastercache_device = self.fastercache_device
                 )
 
             if (controlnet_states is not None) and (i < len(controlnet_states)):
@@ -628,28 +739,40 @@ class CogVideoXTransformer3DModel(ModelMixin, ConfigMixin):
                     controlnet_block_weight = controlnet_weights
                 
                 hidden_states = hidden_states + controlnet_states_block * controlnet_block_weight
+                    
+            if not self.config.use_rotary_positional_embeddings:
+                # CogVideoX-2B
+                hidden_states = self.norm_final(hidden_states)
+            else:
+                # CogVideoX-5B
+                hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
+                hidden_states = self.norm_final(hidden_states)
+                hidden_states = hidden_states[:, text_seq_length:]
 
-        if not self.config.use_rotary_positional_embeddings:
-            # CogVideoX-2B
-            hidden_states = self.norm_final(hidden_states)
-        else:
-            # CogVideoX-5B
-            hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
-            hidden_states = self.norm_final(hidden_states)
-            hidden_states = hidden_states[:, text_seq_length:]
+            # 4. Final block
+            hidden_states = self.norm_out(hidden_states, temb=emb)
+            hidden_states = self.proj_out(hidden_states)
 
-        # 4. Final block
-        hidden_states = self.norm_out(hidden_states, temb=emb)
-        hidden_states = self.proj_out(hidden_states)
+            # 5. Unpatchify
+            # Note: we use `-1` instead of `channels`:
+            #   - It is okay to `channels` use for CogVideoX-2b and CogVideoX-5b (number of input channels is equal to output channels)
+            #   - However, for CogVideoX-5b-I2V also takes concatenated input image latents (number of input channels is twice the output channels)
+            p = self.config.patch_size
+            output = hidden_states.reshape(batch_size, num_frames, height // p, width // p, -1, p, p)
+            output = output.permute(0, 1, 4, 2, 5, 3, 6).flatten(5, 6).flatten(3, 4)
 
-        # 5. Unpatchify
-        # Note: we use `-1` instead of `channels`:
-        #   - It is okay to `channels` use for CogVideoX-2b and CogVideoX-5b (number of input channels is equal to output channels)
-        #   - However, for CogVideoX-5b-I2V also takes concatenated input image latents (number of input channels is twice the output channels)
-        p = self.config.patch_size
-        output = hidden_states.reshape(batch_size, num_frames, height // p, width // p, -1, p, p)
-        output = output.permute(0, 1, 4, 2, 5, 3, 6).flatten(5, 6).flatten(3, 4)
+            if self.fastercache_counter >= self.fastercache_start_step + 1: 
+                (bb, tt, cc, hh, ww) = output.shape
+                cond = rearrange(output[0:1].float(), "B T C H W -> (B T) C H W", B=bb//2, C=cc, T=tt, H=hh, W=ww)
+                uncond = rearrange(output[1:2].float(), "B T C H W -> (B T) C H W", B=bb//2, C=cc, T=tt, H=hh, W=ww)
+
+                lf_c, hf_c = fft(cond)
+                lf_uc, hf_uc = fft(uncond)
+
+                self.delta_lf = lf_uc - lf_c
+                self.delta_hf = hf_uc - hf_c
 
         if not return_dict:
             return (output,)
         return Transformer2DModelOutput(sample=output)
+    

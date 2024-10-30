@@ -349,7 +349,7 @@ class CogVideoX_Fun_Pipeline_Inpaint(VideoSysPipeline):
                     noise[:, place_idx:place_idx + delta, :, :, :] = noise[:, list_idx, :, :, :]
 
             # if strength is 1. then initialise the latents to noise, else initial to image + noise
-            latents = noise if is_strength_max else self.scheduler.add_noise(video_latents, noise, timestep)
+            latents = noise if is_strength_max else self.scheduler.add_noise(video_latents.to(noise), noise, timestep)
             # if pure noise then scale the initial latents by the  Scheduler's init sigma
             latents = latents * self.scheduler.init_noise_sigma if is_strength_max else latents
             latents = latents.to(device)
@@ -610,6 +610,7 @@ class CogVideoX_Fun_Pipeline_Inpaint(VideoSysPipeline):
         context_stride: Optional[int] = None,
         context_overlap: Optional[int] = None,
         freenoise: Optional[bool] = True,
+        tora: Optional[dict] = None,
     ) -> Union[CogVideoX_Fun_PipelineOutput, Tuple]:
         """
         Function invoked when calling the pipeline for generation.
@@ -889,6 +890,13 @@ class CogVideoX_Fun_Pipeline_Inpaint(VideoSysPipeline):
                 if self.transformer.config.use_rotary_positional_embeddings
                 else None
             )
+            if tora is not None and do_classifier_free_guidance:
+                video_flow_features = tora["video_flow_features"].repeat(1, 2, 1, 1, 1).contiguous()
+
+        if tora is not None:
+            for module in self.transformer.fuser_list:
+                for param in module.parameters():
+                    param.data = param.data.to(device)
 
         # 8. Denoising loop
         num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
@@ -980,7 +988,6 @@ class CogVideoX_Fun_Pipeline_Inpaint(VideoSysPipeline):
                         pbar.update(1)
                     # ==========================================
                 elif use_context_schedule:
-                    
                     latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
                     latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
@@ -993,6 +1000,8 @@ class CogVideoX_Fun_Pipeline_Inpaint(VideoSysPipeline):
                     counter = torch.zeros_like(latent_model_input)
                     noise_pred = torch.zeros_like(latent_model_input)
 
+                    current_step_percentage = i / num_inference_steps
+
                     image_rotary_emb = (
                             self._prepare_rotary_positional_embeddings(height, width, context_frames, device)
                             if self.transformer.config.use_rotary_positional_embeddings
@@ -1003,6 +1012,13 @@ class CogVideoX_Fun_Pipeline_Inpaint(VideoSysPipeline):
                         partial_latent_model_input = latent_model_input[:, c, :, :, :]
                         partial_inpaint_latents = inpaint_latents[:, c, :, :, :]
                         partial_inpaint_latents[:, 0, :, :, :] = inpaint_latents[:, 0, :, :, :]
+                        if (tora is not None and tora["start_percent"] <= current_step_percentage <= tora["end_percent"]):
+                            if do_classifier_free_guidance:
+                                partial_video_flow_features = tora["video_flow_features"][:, c, :, :, :].repeat(1, 2, 1, 1, 1).contiguous()
+                            else:
+                                partial_video_flow_features = tora["video_flow_features"][:, c, :, :, :]
+                        else:
+                            partial_video_flow_features = None
 
                         # predict noise model_output
                         noise_pred[:, c, :, :, :] += self.transformer(
@@ -1012,6 +1028,7 @@ class CogVideoX_Fun_Pipeline_Inpaint(VideoSysPipeline):
                             image_rotary_emb=image_rotary_emb,
                             return_dict=False,
                             inpaint_latents=partial_inpaint_latents,
+                            video_flow_features=partial_video_flow_features
                         )[0]
                         
                         counter[:, c, :, :, :] += 1
@@ -1061,6 +1078,8 @@ class CogVideoX_Fun_Pipeline_Inpaint(VideoSysPipeline):
                     # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                     timestep = t.expand(latent_model_input.shape[0])
 
+                    current_step_percentage = i / num_inference_steps
+
                     # predict noise model_output
                     noise_pred = self.transformer(
                         hidden_states=latent_model_input,
@@ -1069,6 +1088,8 @@ class CogVideoX_Fun_Pipeline_Inpaint(VideoSysPipeline):
                         image_rotary_emb=image_rotary_emb,
                         return_dict=False,
                         inpaint_latents=inpaint_latents,
+                        video_flow_features=video_flow_features if (tora is not None and tora["start_percent"] <= current_step_percentage <= tora["end_percent"]) else None,
+
                     )[0]
                     noise_pred = noise_pred.float()
 
